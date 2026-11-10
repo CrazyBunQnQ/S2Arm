@@ -33,7 +33,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
 
                 if (!TryConvertBindless(block, resourceManager, gpuAccessor, texOp) &&
-                    !GenerateBindlessAccess(block, resourceManager, gpuAccessor, texOp, node))
+                    !GenerateBindlessAccess(block, resourceManager, gpuAccessor, texOp, node) &&
+                    !TrySplitPhiHandle(block, resourceManager, gpuAccessor, texOp, node))
                 {
                     // If we can't do bindless elimination, remove the texture operation.
                     // Set any destination variables to zero.
@@ -52,6 +53,281 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     Utils.DeleteNode(node, texOp);
                 }
             }
+        }
+
+        // S2A（#154，移植自 ha7rock/ff-mobile 3cc9c0c，MIT）：句柄经「各路取值不同」的 phi 到达贴图指令。NVN 编译器把只差句柄的贴图读并成一条，
+        //   句柄寄存器在各路各自赋值：Unreal Niagara 的顶点工厂 / 模拟着色器从浮点或半精度数据缓冲读粒子属性，一路是 c2[浮点缓冲]（| 采样器），
+        //   另一路是 c2[半精度缓冲] | 采样器，不走到读的路上寄存器里是先前的无关值（地址、浮点数）。TryGetOperation 只在 phi 各入值相同时才看穿，
+        //   GenerateBindlessAccess 要求每个入值都来自常量缓冲 / 输入 / 存储缓冲，于是这条读被删、结果置 0：最终幻想 共鸣 3212 支着色器丢读
+        //   （顶点 3036、计算 134、片元 42，几乎全是 textureBuffer），Niagara 网格粒子缩放读成 0、缩成一点，招式特效不出。
+        //   这里列出 phi 网能给出的每个值（按位运算里的 phi 展开：c2[a] 或 c2[b]，| 采样器），只由 c2（驱动的句柄表）字、常数和按位运算组成且指向
+        //   贴图的，在本块重建（常量缓冲字哪里都能读），每个句柄带自己的绑定各读一次，运行期句柄与各重建值比较选结果（都不等取最后一个）。
+        //   其余入值是不读贴图的路上寄存器里的值。数组读不动（拷出来的读少了层坐标）。不调 gpuAccessor.Log：直连现编把任何翻译告警当失败。
+        private sealed class HandleExpr
+        {
+            public Operand Leaf;
+            public Instruction Inst;
+            public HandleExpr[] Sources;
+            public string Key;
+        }
+
+        private static List<HandleExpr> HandleAlternatives(Operand operand, int depth, HashSet<PhiNode> phis)
+        {
+            List<HandleExpr> result = new();
+
+            if (operand == null || depth > 8)
+            {
+                return result;
+            }
+
+            if (operand.Type == OperandType.Constant)
+            {
+                result.Add(new HandleExpr { Leaf = operand, Key = $"#{operand.Value:X}" });
+                return result;
+            }
+
+            if (operand.Type == OperandType.ConstantBuffer)
+            {
+                // Only words of c2, where the NVN driver keeps the texture and sampler handles: on paths that do not read the texture the
+                // register may hold a word of the game's own constants (a Niagara data offset), which is no handle
+                if (operand.GetCbufSlot() == 2)
+                {
+                    result.Add(new HandleExpr { Leaf = operand, Key = $"c{operand.GetCbufSlot()}[{operand.GetCbufOffset()}]" });
+                }
+
+                return result;
+            }
+
+            if (operand.Type != OperandType.LocalVariable)
+            {
+                return result;
+            }
+
+            if (operand.AsgOp is PhiNode phi)
+            {
+                if (!phis.Add(phi))
+                {
+                    return result;
+                }
+
+                for (int index = 0; index < phi.SourcesCount; index++)
+                {
+                    foreach (HandleExpr alt in HandleAlternatives(phi.GetSource(index), depth + 1, phis))
+                    {
+                        if (!result.Exists(r => r.Key == alt.Key) && result.Count < 16)
+                        {
+                            result.Add(alt);
+                        }
+                    }
+                }
+
+                phis.Remove(phi);
+
+                return result;
+            }
+
+            if (operand.AsgOp is not Operation op ||
+                op.DestsCount != 1 ||
+                (op.Inst != Instruction.BitwiseOr &&
+                 op.Inst != Instruction.BitwiseAnd &&
+                 op.Inst != Instruction.ShiftLeft &&
+                 op.Inst != Instruction.ShiftRightU32 &&
+                 op.Inst != Instruction.Copy))
+            {
+                return result;
+            }
+
+            if (op.Inst == Instruction.Copy)
+            {
+                return HandleAlternatives(op.GetSource(0), depth + 1, phis);
+            }
+
+            List<HandleExpr[]> partial = new() { Array.Empty<HandleExpr>() };
+
+            for (int index = 0; index < op.SourcesCount; index++)
+            {
+                List<HandleExpr> alts = HandleAlternatives(op.GetSource(index), depth + 1, phis);
+
+                if (alts.Count == 0)
+                {
+                    return result;
+                }
+
+                List<HandleExpr[]> next = new();
+
+                foreach (HandleExpr[] p in partial)
+                {
+                    foreach (HandleExpr alt in alts)
+                    {
+                        if (next.Count < 16)
+                        {
+                            next.Add([.. p, alt]);
+                        }
+                    }
+                }
+
+                partial = next;
+            }
+
+            foreach (HandleExpr[] srcs in partial)
+            {
+                result.Add(new HandleExpr { Inst = op.Inst, Sources = srcs, Key = $"{op.Inst}(" + string.Join(",", Array.ConvertAll(srcs, x => x.Key)) + ")" });
+            }
+
+            return result;
+        }
+
+        private static Operand Materialize(HandleExpr expr, List<Operation> code)
+        {
+            if (expr.Leaf != null)
+            {
+                return expr.Leaf;
+            }
+
+            Operand[] sources = Array.ConvertAll(expr.Sources, x => Materialize(x, code));
+            Operand dest = OperandHelper.Local();
+            code.Add(new Operation(expr.Inst, dest, sources));
+
+            return dest;
+        }
+
+        // A value of the phi web that is not this read's texture: its texture word is outside c2's texture tables, or the binding it resolved to
+        // already exists with another type (the register held the handle of a texture this shader reads elsewhere as an array; such a read
+        // does not compile)
+        private static bool BindingTypeMatches(ResourceManager resourceManager, TextureOperation read)
+        {
+            const SamplerType Shape = SamplerType.Mask | SamplerType.Array | SamplerType.Multisample;
+
+            // The texture word must lie in c2's texture tables (0x20 combined, 0x120 images, 0x168 separate textures; samplers start at 0x568):
+            // a value such as c2[sampler] | c2[sampler] also parses as a handle
+            if (!resourceManager.TryGetCbufSlotAndHandleForTexture(new SetBindingPair(read.Set, read.Binding), out int cbufSlot, out int handle) ||
+                (cbufSlot & 0xffff) != 2 ||
+                (handle & 0x3fff) * 4 < 0x20 ||
+                (handle & 0x3fff) * 4 >= 0x568)
+            {
+                return false;
+            }
+
+            foreach (TextureDescriptor descriptor in resourceManager.GetTextureDescriptors())
+            {
+                if (descriptor.Set == read.Set && descriptor.Binding == read.Binding)
+                {
+                    return (descriptor.Type & Shape) == (read.Type & Shape);
+                }
+            }
+
+            return true;
+        }
+
+        private static bool TrySplitPhiHandle(
+            BasicBlock block,
+            ResourceManager resourceManager,
+            IGpuAccessor gpuAccessor,
+            TextureOperation texOp,
+            LinkedListNode<INode> node)
+        {
+            // Array reads are left alone: their copies came out with the layer missing from the coordinates (2 shaders of FINAL FANTASY RESONANCE
+            // did not compile)
+            if ((texOp.Inst != Instruction.TextureSample && !texOp.Inst.IsTextureQuery()) || (texOp.Type & SamplerType.Array) != 0)
+            {
+                return false;
+            }
+
+            Operand handle = texOp.GetSource(0);
+
+            if (handle.AsgOp is not PhiNode)
+            {
+                return false;
+            }
+
+            List<(Operand Value, List<Operation> Code, TextureOperation Read)> reads = new();
+
+            foreach (HandleExpr alt in HandleAlternatives(handle, 0, new HashSet<PhiNode>()))
+            {
+                if (alt.Leaf != null && alt.Leaf.Type == OperandType.Constant)
+                {
+                    continue;
+                }
+
+                List<Operation> code = new();
+                Operand value = Materialize(alt, code);
+
+                Operand[] sources = new Operand[texOp.SourcesCount];
+
+                for (int index = 0; index < sources.Length; index++)
+                {
+                    sources[index] = texOp.GetSource(index);
+                }
+
+                sources[0] = value;
+
+                Operand[] dests = new Operand[texOp.DestsCount];
+
+                for (int index = 0; index < dests.Length; index++)
+                {
+                    dests[index] = OperandHelper.Local();
+                }
+
+                TextureOperation read = new(texOp.Inst, texOp.Type, texOp.Format, texOp.Flags, texOp.Set, texOp.Binding, texOp.Index, dests, sources);
+
+                if (TryConvertBindless(block, resourceManager, gpuAccessor, read) && BindingTypeMatches(resourceManager, read))
+                {
+                    reads.Add((value, code, read));
+                }
+                else
+                {
+                    for (int index = 0; index < read.SourcesCount; index++)
+                    {
+                        read.SetSource(index, null);
+                    }
+                }
+
+                if (reads.Count == 8)
+                {
+                    break;
+                }
+            }
+
+            if (reads.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var (_, code, read) in reads)
+            {
+                foreach (Operation op in code)
+                {
+                    block.Operations.AddBefore(node, op);
+                }
+
+                block.Operations.AddBefore(node, read);
+            }
+
+            Operand[] conds = new Operand[reads.Count - 1];
+
+            for (int index = 0; index < conds.Length; index++)
+            {
+                conds[index] = OperandHelper.Local();
+                block.Operations.AddBefore(node, new Operation(Instruction.CompareEqual, conds[index], handle, reads[index].Value));
+            }
+
+            for (int destIndex = 0; destIndex < texOp.DestsCount; destIndex++)
+            {
+                Operand result = reads[^1].Read.GetDest(destIndex);
+
+                for (int index = conds.Length - 1; index >= 0; index--)
+                {
+                    Operand selected = OperandHelper.Local();
+                    block.Operations.AddBefore(node, new Operation(Instruction.ConditionalSelect, selected, conds[index], reads[index].Read.GetDest(destIndex), result));
+                    result = selected;
+                }
+
+                block.Operations.AddBefore(node, new Operation(Instruction.Copy, texOp.GetDest(destIndex), result));
+            }
+
+            Utils.DeleteNode(node, texOp);
+
+            return true;
         }
 
         private static bool GenerateBindlessAccess(
