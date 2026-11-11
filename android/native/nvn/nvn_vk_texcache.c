@@ -2167,13 +2167,13 @@ struct nvn_vk_tex *nvn_vk_texcache_get_tex(struct nvn_vk_texcache *c, const tex_
                         (void *)t->mem, (unsigned long long)s->serial, (unsigned long long)t->serial,
                         s->width, s->height, s->nvn_format, s->nvn_target);
                 o = s;
+                break;   // 找到兼容存储才结束；不同尺寸的同址对象可能排在它前面。
             } else if (n++ < 30) {
                 __android_log_print(ANDROID_LOG_INFO, "S2Arm",
                     "tex alias: addr=%p incompatible serial=%llu(%ux%u fmt=0x%x tgt=%u) vs serial=%llu(%ux%u fmt=0x%x tgt=%u); separate images",
                     (void *)t->mem, (unsigned long long)s->serial, s->width, s->height, s->nvn_format, s->nvn_target,
                     (unsigned long long)t->serial, t->d.width, t->d.height, (unsigned)t->d.format, target);
             }
-            break;
         }
     }
     if (o && (o->serial == t->serial || tex_has_serial(o, t->serial)) && o->nvn_format == (uint32_t)t->d.format && o->width == t->d.width &&
