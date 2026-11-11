@@ -542,7 +542,7 @@ class StoreMetaTests(JobCase):
         popen = []
         with patch("subprocess.Popen", lambda args, **kw: popen.append(args)):
             self.assertTrue(library.store_meta_background(self.fresh(), {B}))
-            self.assertEqual(popen[-1][3:5], [str(Path(library.__file__).with_name("store_meta_bg.py")), str(self.c.private)])
+            self.assertEqual(popen[-1][1:7], ["-I", "-X", "utf8", "-B", str(Path(library.__file__).with_name("store_meta_bg.py")), str(self.c.private)])   # -X utf8：-I 下 PYTHONUTF8 不生效（#514）
             self.assertEqual(popen[-1][-1], B)                                          # 只查导入刚加的款
             self.assertFalse(library.store_meta_background(self.fresh(), {A}))          # A 都有了：不起
             with patch.dict(os.environ, {"S2A_BANNER_FETCH": "0"}):

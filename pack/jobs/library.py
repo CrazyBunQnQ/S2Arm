@@ -255,7 +255,7 @@ def store_meta_background(c, ids=None):
     if os.environ.get("S2A_BANNER_FETCH", "1") == "0" or not store_todo(c, ids):
         return False
     import subprocess
-    args = [sys.executable, "-I", "-B", str(Path(__file__).with_name("store_meta_bg.py")), str(c.private), str(c.library),
+    args = [sys.executable, "-I", "-X", "utf8", "-B", str(Path(__file__).with_name("store_meta_bg.py")), str(c.private), str(c.library),
             str(c.r.get("libraryId") or ""), str(c.engine), *sorted(ids or ())]
     common = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     try:

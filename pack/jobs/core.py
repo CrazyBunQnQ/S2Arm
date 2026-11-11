@@ -118,11 +118,37 @@ class Cancelled(Exception):
     pass
 
 
+def system_encoding():
+    import locale
+    return locale.getpreferredencoding(False)
+
+
 def read(path, default=None):
+    """读共享 JSON：一律按 UTF-8（atomic 一律写 UTF-8；不靠 UTF-8 模式——#514 后台商店查询用 -I 起、PYTHONUTF8 不生效，
+    非中文 Windows 上 catalog.json 被按 cp1252 写坏，之后每次导入在初始化就 UnicodeDecodeError）。
+    UTF-8 解不开 = 旧版按系统编码写坏的：依次严格试系统编码、cp1252，解得开且是 JSON 就当场自愈——原字节备份成 <名>.<编码>.bak，
+    按 UTF-8 原子回写，回读核对与原对象相等。都解不开照样抛错（不返回空游戏库）"""
+    path = Path(path)
     try:
-        return json.loads(Path(path).read_text())
+        raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError):   # NotADirectoryError：路径中间一级是文件（遍历到 .DS_Store 再读 .DS_Store/game.json，#343）＝没有
         return default
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as first:
+        for enc in dict.fromkeys(e for e in (system_encoding(), "cp1252") if e and e.replace("-", "").lower() != "utf8"):
+            try:
+                value = json.loads(raw.decode(enc))
+            except (UnicodeDecodeError, ValueError, LookupError):
+                continue
+            bak = path.with_name(f"{path.name}.{enc}.bak")
+            if not bak.exists():
+                bak.write_bytes(raw)
+            atomic(path, value)
+            if json.loads(path.read_bytes().decode("utf-8")) != value:
+                raise Failure(f"{path.name} 从 {enc} 转成 UTF-8 后核对不一致；原文件备份在 {bak.name}。")
+            return value
+        raise first
 
 
 # Windows：目标被别的进程打开且没带共享删除时，替换报 PermissionError（#130：Python 读方 open() 不带 FILE_SHARE_DELETE，杀毒 / 索引也会短暂占用）
@@ -171,7 +197,7 @@ def atomic(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:   # 一律 UTF-8（#514：不靠 UTF-8 模式）
             json.dump(value, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
