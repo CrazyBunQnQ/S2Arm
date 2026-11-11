@@ -6247,42 +6247,7 @@ static uint64_t g_tb2_binds, g_tb2_made, g_tb2_fail, g_tb2_tail;
 // 不对齐池偏移的缓冲纹理：对齐副本上的 2D 行视图（见 tbuf_as_2d）。取不到副本（GPU 本次提交里写过这段、超出影子上限、内存不可读）照旧回 nil（这一槽读 0）并点名
 static uint64_t g_tb2_shadow, g_tb2_shadow_fail;
 static id<MTLBuffer> arena_find(const uint8_t *p, NSUInteger *off, NSUInteger *len);   // 帧暂存块里 p 所在的缓冲（定义在 NvArena 之后）
-// #309 (second half) aligned copies made on the GPU timeline. The CPU copy below (ubp_get) refuses what it cannot see at this point: more than 64 KiB, or bytes the GPU wrote
-//   earlier in this submission (a lighting list of 1,052,640 R32UI, 4 MiB, written by a compute pass, at a pool offset 32 bytes off the 64 iPhone needs: the copy was refused and
-//   the slot read 0 again, the same flicker). Before a draw / dispatch that reads such a buffer texture as 2D rows, tba_prepare ends the open render pass and has the GPU copy
-//   the bytes into the frame arena (256-byte aligned), after every earlier GPU write in queue order; the view is made on the copy. A copy holds until the next buffer write outside
-//   a render pass or the next submission (g_wr_epoch / g_arena_gen, as the indirect-draw conversions)
-typedef struct { uint64_t ser, off; MTLPixelFormat pf; __unsafe_unretained id<MTLBuffer> src; __strong id<MTLBuffer> buf; size_t boff, len; } tba_ent;
-enum { TBA_MAX = 32 };
-static tba_ent g_tba[TBA_MAX]; static int g_tba_n; static uint64_t g_tba_epoch, g_tba_sub, g_tba_copies, g_tba_bytes, g_tba_splits;
-static void tba_valid(void) {
-    if (g_tba_epoch == g_wr_epoch && g_tba_sub == g_arena_gen) return;
-    for (int i = 0; i < g_tba_n; i++) g_tba[i].buf = nil;
-    g_tba_n = 0; g_tba_epoch = g_wr_epoch; g_tba_sub = g_arena_gen;
-}
-static const tba_ent *tba_find(uint64_t ser, id<MTLTexture> t) {
-    tba_valid();
-    for (int i = 0; i < g_tba_n; i++) if (g_tba[i].ser == ser && g_tba[i].src == t.buffer && g_tba[i].off == t.bufferOffset && g_tba[i].pf == t.pixelFormat) return &g_tba[i];
-    return NULL;
-}
-// The 2D-row geometry tbuf_as_2d uses (shared with tba_prepare so the copy covers exactly what the view reads); 0 = no 2D-row form
-static int tbuf_geom(const tex_t *tt, id<MTLTexture> t, int exact, uint32_t *w, uint32_t *h, uint32_t *row) {
-    int bw, bh; uint32_t bpb = (uint32_t)nvn_fmt_bpb(tt->d.format, &bw, &bh); NSUInteger al = linear_align(t.pixelFormat);
-    if (!t.buffer || bw != 1 || bh != 1) return 0;
-    if (exact && nvn_tbuf_rows_exact(t.width, bpb, (uint32_t)al, w, h, row)) return 1;
-    return nvn_tbuf_rows(t.width, bpb, (uint32_t)al, w, h, row);
-}
 static id<MTLTexture> tbuf_rows_shadow(int tid, id<MTLTexture> t, const tex_t *tt, uint32_t w, uint32_t h, uint32_t row, uint64_t *rid) {
-    const tba_ent *ge = tba_find(tt->serial, t);
-    if (ge) {   // copied on the GPU before this draw / dispatch (tba_prepare)
-        while (h > 1 && (uint64_t)row * h > ge->len) h--;
-        MTLTextureDescriptor *gd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:w height:h mipmapped:NO];
-        gd.resourceOptions = ge->buf.resourceOptions; gd.usage = MTLTextureUsageShaderRead;
-        id<MTLTexture> gv = [ge->buf newTextureWithDescriptor:gd offset:ge->boff bytesPerRow:row];
-        if (gv) { defer_obj_release(gv); *rid = gv.gpuResourceID._impl; g_tb2_binds++; return gv; }
-        if (!g_tb2_shadow_fail++) MLOG("【红】 cannot create the 2D-row view of a GPU-copied texture buffer: %ux%u format %lu row %u at arena offset %lu", w, h, (unsigned long)t.pixelFormat, row, (unsigned long)ge->boff);
-        return nil;
-    }
     id<MTLBuffer> buf = t.buffer; uint64_t avail = buf.length > t.bufferOffset ? buf.length - t.bufferOffset : 0, want = (uint64_t)row * h;
     uint64_t len = want < avail ? want : avail;   // 末行越过池缓冲的部分本来就是未定义读，副本只取池里有的
     uint64_t lo = (uint64_t)(uintptr_t)tt->mem, g = 0; const uint8_t *c = NULL;
@@ -10106,36 +10071,6 @@ static uint64_t g_defer_n, g_defer_draws, g_defer_fallbacks;
 static const uint8_t *g_defer_pend;   // The P-range end op of the group that is in its P range (NULL if none): the exec loop compares each op against just this one pointer
 static int g_defer_nact, g_defer_natq;   // Number of active groups, number of groups that reached Q and await replay (the hot path only looks at the counts, no per-slot scan)
 static int g_defer_ab = -1, g_defer_ab_on;
-// One buffer texture (texture ID tid, read as 2D rows; exact: the wrapped 1D fetch's exact form) at an offset the linear-texture alignment refuses and with no GPU copy yet: ends
-//   the open render pass and has the GPU copy the bytes the 2D-row view reads into the frame arena now (see tba_ent). Returns 1 when it made a copy. Leaves the copy encoder open
-//   (the caller ends it once, after all of a draw's copies)
-static int tba_copy(int tid, int exact) {
-    if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok || g_tba_n >= TBA_MAX) return 0;
-    void *tv = NULL; (void)tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-    if (!t || t.textureType != MTLTextureTypeTextureBuffer || !t.buffer || !(t.bufferOffset % linear_align(t.pixelFormat))) return 0;
-    const tex_t *tt = &g_treg[tid].t; uint32_t w, h, row;
-    if (!tbuf_geom(tt, t, exact, &w, &h, &row) || tba_find(tt->serial, t)) return 0;
-    uint64_t avail = t.buffer.length > t.bufferOffset ? t.buffer.length - t.bufferOffset : 0, want = (uint64_t)row * h; size_t len = (size_t)(want < avail ? want : avail);
-    if (!len) return 0;
-    if (g_enc) { g_tba_splits++; PD("M %llu texture buffer aligned copy on the GPU: render pass split here", g_stat_pass); rp_end(); }
-    id<MTLBuffer> ab = nil; size_t off = arena_alloc(len, &ab); if (!ab) return 0;
-    enc_b_copy_buffer(blit(), t.buffer, t.bufferOffset, ab, off, len);
-    g_tba[g_tba_n++] = (tba_ent){tt->serial, t.bufferOffset, t.pixelFormat, t.buffer, ab, off, len};
-    g_tba_copies++; g_tba_bytes += len;
-    if (g_tba_copies == 1 || g_tba_copies == 100 || g_tba_copies % 100000 == 0) MLOG("texture buffer at an unaligned pool offset (%lu, texture ID %d): copied on the GPU into the frame arena before use (%lu bytes; %llu copies so far)",
-        (unsigned long)t.bufferOffset, tid, (unsigned long)len, (unsigned long long)g_tba_copies);
-    return 1;
-}
-// Before a draw / dispatch: every buffer texture the stages read as 2D rows (wrapped 1D fetch) gets its GPU copy if it needs one (tba_copy). sh / stage: the program's stages (draw)
-//   or the compute shader (dispatch, stage 5)
-static void tba_prepare(NvShader *x0, NvShader *x1, NvShader *x2, NvShader *x3, NvShader *x4, int compute) {
-    NvShader *sh[5] = {x0, x1, x2, x3, x4}; int made = 0;
-    for (int k = 0; k < 5; k++) { NvShader *x = sh[k]; if (!x) continue; int stage = compute ? 5 : k;
-        for (int i = 0; i < x->rf.nb; i++) { const nvn_rbind *b = &x->rf.b[i];
-            if (b->kind != NVN_RB_TEX || !b->f1d || (MTLTextureType)b->dtt != MTLTextureType2D) continue;
-            made |= tba_copy((int)(tex_slot_h(S.tex[stage], S.img[stage], b->reg) & 0xfffff), b->f1d == 2); } }
-    if (made && g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the copies end their encoder: the next pass / dispatch begins with its barrier after them
-}
 static void draw(const p_draw *dw, const p_draw_idx *di);
 static int defer_has_in_p(void) { return g_defer_pend != NULL; }
 static int defer_has_active(void) { return g_defer_nact > 0; }
@@ -13139,7 +13074,6 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         PD("N %llu zero-source draw skipped", g_stat_pass + 1); return; }
     gmem_count_draw(pr);
     if (g_nlc && !g_enc) lc_take(pr);   // waiting clears: this pass's load actions, or landed before it (see lc_take)
-    tba_prepare(pr->sh[0], pr->sh[1], pr->sh[2], pr->sh[3], pr->sh[4], 0);   // #309: unaligned buffer textures read as 2D rows, copied on the GPU before this draw (see tba_ent)
     if (ixc_wanted(dw, di) && !ixc_find(dw, di)) ixc_run(dw, di);   // indirect quads / fans / 8-bit indices: converted on the GPU before the render pass, at their own place in the replay (see ixc_run)
     uint64_t mdx = 0;   // the masked copy of the record (mdx_run); a draw it could not copy waits for the count instead
     if (mdx_on) { uint64_t ind = dw ? dw->ind : di->ind, cnt = dw ? dw->mdi_cnt : di->mdi_cnt; int i = dw ? dw->mdi_i : di->mdi_i;
@@ -13563,7 +13497,6 @@ static void dispatch(const p_dispatch *dp) {
     img_wr_prescan(cs, 5); if (g_imwr_npend) img_wr_upgrade();   // image textures made without shader writes: upgraded before this dispatch's encoder opens (img_wr_note)
     rp_flush();   // a full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does (upstream reference implementation, MIT)
     rs_pre_compute(cs);   // S2Arm internal resolution: scaled textures this dispatch reads / writes go back to 1 first (nvn_rscale_ops.inc)
-    tba_prepare(cs, nil, nil, nil, nil, 1);   // #309: as for draws (see tba_ent)
     uint32_t gx = (uint32_t)dp->x, gy = (uint32_t)dp->y; wd_dispatch(cs, &gx, &gy, dp->ind != 0);   // S2Arm widen: images it writes widened, X groups to the widened width, compute constants rewritten (widen_glue.inc)
     int own = dispatch_own();
     if (own && g_blit) { enc_b_end(g_blit); g_blit = nil; }
