@@ -53,6 +53,14 @@ int main(void) {
     ns2_raw_input raw; ns2_decode_input_report(5, left05, sizeof left05, &raw);
     CK(raw.buttons == BIT(UP) && ns2_decode_side_buttons(left05, sizeof left05) == NS2_SIDE_SL_L,
        "⑫ SL / SR 不进按键位：左只按住上 + SL，按键只有上，SL 只在横握专用的 side 位里（实 %llx）", (unsigned long long)raw.buttons);
+    // 扫描策略（11-11 实机：记着左只、左只没开机，右只长按 SYNC 连不上）。期望按「另一侧能不能在直连等待期间被找到」手算：
+    //   只剩一只 Joy-Con、还在连（没就绪、没失败）也要扫另一侧；失败了就不扫；Pro / 空不扫另一侧；Joy-Con 失败不停扫描、Pro 失败照旧停
+    CK(ns2_scan_wants_other_side(NS2_KIND_JOYCON_L, 0, 0) && ns2_scan_wants_other_side(NS2_KIND_JOYCON_R, 0, 0) && ns2_scan_wants_other_side(NS2_KIND_JOYCON_L, 1, 0),
+       "⑬ 只有一只 Joy-Con：还在连（未就绪）也继续扫另一侧，已就绪照旧扫");
+    CK(!ns2_scan_wants_other_side(NS2_KIND_JOYCON_L, 0, 1) && !ns2_scan_wants_other_side(NS2_KIND_PRO, 1, 0) && !ns2_scan_wants_other_side(NS2_KIND_NONE, 0, 0),
+       "⑭ 那一只已失败 / 是 Pro / 没有型号：不扫另一侧");
+    CK(!ns2_link_failure_stops_scan(NS2_KIND_JOYCON_L) && !ns2_link_failure_stops_scan(NS2_KIND_JOYCON_R) && ns2_link_failure_stops_scan(NS2_KIND_PRO),
+       "⑮ 链路失败：Joy-Con 不停扫描（另一侧还在窗口里），Pro 照旧停");
     printf("%s test_joycon：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

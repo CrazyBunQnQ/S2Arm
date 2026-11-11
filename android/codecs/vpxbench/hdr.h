@@ -11,6 +11,18 @@
 #define S2A_NVDEC_ENTROPY_SIZE 3744
 #define S2A_NVDEC_COUNTS_SIZE 13264   // BackwardUpdates: inter-mode counts as [7][3][2]
 
+// Byte offsets of each compressed-header-updateable section inside the 3087-byte Ryujinx
+// Vp9EntropyProbs blob. Shared by the writer (hdr.c) and audit-side decoders (vp9audit).
+enum {
+  S2A_OFF_YMODE = 1000, S2A_OFF_UV = 1036, S2A_OFF_PARTITION = 1174, S2A_OFF_COEF = 1222,
+  S2A_OFF_SWINTERP = 2950, S2A_OFF_INTERMODE = 2958, S2A_OFF_INTRAINTER = 2979,
+  S2A_OFF_COMPINTER = 2983, S2A_OFF_SINGLEREF = 2988, S2A_OFF_COMPREF = 2998,
+  S2A_OFF_TX32 = 3003, S2A_OFF_TX16 = 3009, S2A_OFF_TX8 = 3013, S2A_OFF_SKIP = 3015,
+  S2A_OFF_JOINTS = 3018, S2A_OFF_SIGN = 3021, S2A_OFF_CLASSES = 3023, S2A_OFF_CLASS0 = 3043,
+  S2A_OFF_BITS = 3045, S2A_OFF_CLASS0FP = 3065, S2A_OFF_FP = 3077, S2A_OFF_CLASS0HP = 3083,
+  S2A_OFF_HP = 3085
+};
+
 // The PictureInfo fields the header needs (Ryujinx.Graphics.Nvdec.Types.Vp9.PictureInfo).
 typedef struct {
     uint32_t bitstream_size;
@@ -54,6 +66,17 @@ size_t s2a_counts_to_guest(const uint8_t *counts, uint8_t *out);
 // otherwise returns the reason the job must go to C#. *target receives the slot the output refreshes.
 const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots, const uint8_t *tiles,
                             size_t tiles_size, uint8_t *dst, size_t cap, size_t *len, int *target);
+// Same, but the compressed header is real: defaults -> supplied prob deltas (spec §6.3). probs/defaults are the
+// 3087-byte Ryujinx-layout blobs. The caller should run s2a_compressed_check first for sections without update slots.
+const char *s2a_build_frame2(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots,
+                             const uint8_t *probs, const uint8_t *defaults, const uint8_t *tiles,
+                             size_t tiles_size, uint8_t *dst, size_t cap, size_t *len, int *target);
+// Compressed-header expressibility: NULL when every load-bearing prob section can be carried (see
+// Vp9CompressedHeader.Check in the C# mirror for the rules).
+const char *s2a_compressed_check(const s2a_pic *p, const uint8_t *probs, const uint8_t *defaults);
+// Writes just the compressed header; returns the length or -1 on buffer overflow.
+int s2a_compressed_write(const s2a_pic *p, const uint8_t *probs, const uint8_t *defaults,
+                         uint8_t *dst, size_t cap);
 // After a successful native decode: record the output in the slot map.
 void s2a_slots_commit(s2a_slots *slots, const s2a_pic *p, const s2a_surfaces *sf, int target);
 void s2a_slots_reset(s2a_slots *slots);

@@ -473,9 +473,9 @@ static id<MTLRenderCommandEncoder> setup(MTLPrimitiveType primitive, uint32_t ve
     if (!p || !p->linked) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return nil; }
     if (!gl_prog_fns(p)) { gl_bad_err++; return nil; }   // 现编的阶段第一次画：等它那一支 Metal 编完（坏了不画，红已在现编处报）
     struct gl_vao *v = gl_vao_cur(); if (!v) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return nil; }
-    for (int i = 0; i < p->nattr; i++) {   // 规范：绘制读映射着的缓冲是 GL_INVALID_OPERATION（不画）
+    for (int i = 0; i < p->nattr; i++) {   // 规范：绘制读映射着的缓冲是 GL_INVALID_OPERATION（不画）；持久映射除外（GL 4.5 §6.3.2）
         const gl_attrib *a = &v->a[p->attr[i].loc]; struct gl_buffer *b = a->enabled && a->buf ? gl_name_get(&gl_buffers, a->buf) : NULL;
-        if (b && b->map_access) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return nil; }
+        if (b && b->map_access && !(b->map_bits & 0x40)) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return nil; }
     }
     // 组 mip / cube 要开 blit；必须在本笔的渲染编码器和任何绘制状态之前准备。
     if (p->nsmp && !gl_tex_prepare(p)) { gl_bad_feat++; return nil; }
@@ -579,10 +579,12 @@ static uint64_t prim_count(GLenum mode, GLsizei count) {
                     case GL_TRIANGLES: return n / 3; case GL_TRIANGLE_STRIP: case GL_TRIANGLE_FAN: return n >= 3 ? n - 2 : 0; }
     return 0;
 }
-GLB(glDrawArrays, void, GLenum mode, GLint first, GLsizei count) { @autoreleasepool {
-    CTX(); MTLPrimitiveType t; if (first < 0 || count < 0) { gl_set_error(GL_INVALID_VALUE); return; }
+// glDrawArrays / glDrawArraysInstanced 共用：instances 个实例
+static void draw_arrays(GLenum mode, GLint first, GLsizei count, GLsizei instances) {
+    MTLPrimitiveType t; if (first < 0 || count < 0 || instances < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     if (!prim(mode, &t)) { GLRED1("图元 %#x 没实现", mode); gl_bad_feat++; return; }
-    if (!count || (mode == GL_TRIANGLE_FAN && count < 3)) return;
+    if (!count || !instances || (mode == GL_TRIANGLE_FAN && count < 3)) return;
+    NSUInteger ni = (NSUInteger)instances;
     if (mode == GL_TRIANGLE_FAN) { @autoreleasepool {
         if (g_array_fan_count < count) {
             NSUInteger limit = gl_dev.maxBufferLength / (3 * sizeof(uint32_t)) + 2;
@@ -593,32 +595,36 @@ GLB(glDrawArrays, void, GLenum mode, GLint first, GLsizei count) { @autoreleasep
             id<MTLBuffer> indices = fan_indices(NULL, 0, (GLsizei)capacity); if (!indices) return;
             g_array_fan = indices; g_array_fan_count = (GLsizei)capacity;
         }
-        id<MTLRenderCommandEncoder> re = setup(MTLPrimitiveTypeTriangle, (uint32_t)first + (uint32_t)count, 1); if (!re) return;
-        [re drawIndexedPrimitives:t indexCount:((NSUInteger)count - 2) * 3 indexType:MTLIndexTypeUInt32 indexBuffer:g_array_fan indexBufferOffset:0 instanceCount:1 baseVertex:(NSInteger)first baseInstance:0]; gl_n_draws++; g_prims += prim_count(mode, count);
+        id<MTLRenderCommandEncoder> re = setup(MTLPrimitiveTypeTriangle, (uint32_t)first + (uint32_t)count, (uint32_t)instances); if (!re) return;
+        [re drawIndexedPrimitives:t indexCount:((NSUInteger)count - 2) * 3 indexType:MTLIndexTypeUInt32 indexBuffer:g_array_fan indexBufferOffset:0 instanceCount:ni baseVertex:(NSInteger)first baseInstance:0]; gl_n_draws++; g_prims += prim_count(mode, count) * ni;
     } return; }
-    id<MTLRenderCommandEncoder> re = setup(t, (uint32_t)first + (uint32_t)count, 1); if (!re) return;
-    [re drawPrimitives:t vertexStart:(NSUInteger)first vertexCount:(NSUInteger)count]; gl_n_draws++; g_prims += prim_count(mode, count);
-}}
-// glDrawElements / glDrawElementsInstanced 共用：instances 个实例（gl_InstanceID 0..instances−1，有除数的属性按实例步进）
-static void draw_elements(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instances) {
+    id<MTLRenderCommandEncoder> re = setup(t, (uint32_t)first + (uint32_t)count, (uint32_t)instances); if (!re) return;
+    [re drawPrimitives:t vertexStart:(NSUInteger)first vertexCount:(NSUInteger)count instanceCount:ni]; gl_n_draws++; g_prims += prim_count(mode, count) * ni;
+}
+GLB(glDrawArrays, void, GLenum mode, GLint first, GLsizei count) { @autoreleasepool { CTX(); draw_arrays(mode, first, count, 1); }}
+GLB(glDrawArraysInstanced, void, GLenum mode, GLint first, GLsizei count, GLsizei instances) { @autoreleasepool { CTX(); draw_arrays(mode, first, count, instances); }}
+// glDrawElements / glDrawElementsInstanced / glDrawElementsBaseVertex 共用：instances 个实例（gl_InstanceID 0..instances−1，有除数的属性按实例步进）；
+//   bv：每个索引加上的基准顶点（GL 3.2 BaseVertex，LÖVE 画四边形批用它）
+static void draw_elements(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instances, GLint bv) {
     MTLPrimitiveType t; if (count < 0 || instances < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     if (!prim(mode, &t)) { GLRED1("图元 %#x 没实现", mode); gl_bad_feat++; return; }
     if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT && type != GL_UNSIGNED_INT) { gl_set_error(GL_INVALID_ENUM); return; }
     if (!count || !instances || (mode == GL_TRIANGLE_FAN && count < 3)) return;
     struct gl_vao *v = gl_vao_cur(); struct gl_buffer *ib = v ? gl_name_get(&gl_buffers, v->ebo) : NULL;
-    if (ib && ib->map_access) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return; }   // 映射着的元素数组缓冲不许画（规范）
+    if (ib && ib->map_access && !(ib->map_bits & 0x40)) { gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return; }   // 映射着的元素数组缓冲不许画（规范；持久映射除外）
+    if (ib && (ib->map_bits & 0x40)) { ib->idx16 = nil; ib->fan32_cache = nil; }   // 持久映射着：游戏随时改索引，按内容缓存的副本不能沿用
     NSUInteger ni = (NSUInteger)instances;
     size_t esz = type == GL_UNSIGNED_BYTE ? 1 : type == GL_UNSIGNED_SHORT ? 2 : 4;
     if (!ib || !ib->buf) { @autoreleasepool {   // 没绑元素数组缓冲 = 客户端内存索引（indices 是游戏内存地址）：每笔拷成临时索引缓冲（三角扇照样展开、ubyte 扩成 ushort）
         const uint8_t *src = indices; if (!src) { GLRED1("glDrawElements：客户端内存索引地址为空"); gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return; }
-        uint32_t vend = 0; if (client_attrs()) for (GLsizei i = 0; i < count; i++) vend = MAX(vend, fan_index(src, type, (NSUInteger)i) + 1);
+        uint32_t vend = 0; if (client_attrs()) for (GLsizei i = 0; i < count; i++) vend = MAX(vend, (uint32_t)((int64_t)fan_index(src, type, (NSUInteger)i) + bv + 1));
         id<MTLBuffer> ix; NSUInteger n = (NSUInteger)count; MTLIndexType it = type == GL_UNSIGNED_INT ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
         if (mode == GL_TRIANGLE_FAN) { ix = fan_indices(src, type, count); n = ((NSUInteger)count - 2) * 3; it = MTLIndexTypeUInt32; }
         else if (type == GL_UNSIGNED_BYTE) { ix = [gl_dev newBufferWithLength:n * sizeof(uint16_t) options:MTLResourceStorageModeShared]; uint16_t *d = ix.contents; for (NSUInteger i = 0; d && i < n; i++) d[i] = src[i]; }
         else ix = [gl_dev newBufferWithBytes:src length:n * esz options:MTLResourceStorageModeShared];
         if (!ix) { GLOG("【红】 glDrawElements 客户端内存索引拷贝分配失败（%d 个）", count); gl_bad_err++; return; }
         id<MTLRenderCommandEncoder> re = setup(t, vend, (uint32_t)instances); if (!re) return;
-        [re drawIndexedPrimitives:t indexCount:n indexType:it indexBuffer:ix indexBufferOffset:0 instanceCount:ni]; gl_n_draws++; g_prims += prim_count(mode, count) * ni;
+        [re drawIndexedPrimitives:t indexCount:n indexType:it indexBuffer:ix indexBufferOffset:0 instanceCount:ni baseVertex:bv baseInstance:0]; gl_n_draws++; g_prims += prim_count(mode, count) * ni;
     } return; }
     @autoreleasepool {
         id<MTLBuffer> indexBuffer = ib->buf; NSUInteger offset = (NSUInteger)(uintptr_t)indices;
@@ -659,17 +665,18 @@ static void draw_elements(GLenum mode, GLsizei count, GLenum type, const void *i
         if (client_attrs()) {   // 客户端内存顶点数组配元素数组缓冲：从缓冲里的索引算顶点范围
             size_t o = (size_t)(uintptr_t)indices;
             if (o > ib->size || (size_t)count > (ib->size - o) / esz) { GLRED1("glDrawElements：索引范围超出元素数组缓冲"); gl_set_error(GL_INVALID_OPERATION); gl_bad_err++; return; }
-            for (GLsizei i = 0; i < count; i++) vend = MAX(vend, fan_index((const uint8_t *)ib->buf.contents + o, type, (NSUInteger)i) + 1);
+            for (GLsizei i = 0; i < count; i++) vend = MAX(vend, (uint32_t)((int64_t)fan_index((const uint8_t *)ib->buf.contents + o, type, (NSUInteger)i) + bv + 1));
         }
         id<MTLRenderCommandEncoder> re = setup(t, vend, (uint32_t)instances); if (!re) return;
         if (type != GL_UNSIGNED_BYTE && mode != GL_TRIANGLE_FAN) gl_buffer_ref(ib);   // 转换的原 EBO 只在上面被 CPU 读取。
         // 普通 commandBuffer 保留编码时引用的资源，临时索引或失效缓存均活到本次 GPU 提交完成。
-        [re drawIndexedPrimitives:t indexCount:indexCount indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:ni];
+        [re drawIndexedPrimitives:t indexCount:indexCount indexType:indexType indexBuffer:indexBuffer indexBufferOffset:offset instanceCount:ni baseVertex:bv baseInstance:0];
         gl_n_draws++; g_prims += prim_count(mode, count) * ni;
     }
 }
-GLB(glDrawElements, void, GLenum mode, GLsizei count, GLenum type, const void *indices) { @autoreleasepool { CTX(); draw_elements(mode, count, type, indices, 1); }}
-GLB(glDrawElementsInstanced, void, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instances) { @autoreleasepool { CTX(); draw_elements(mode, count, type, indices, instances); }}
+GLB(glDrawElements, void, GLenum mode, GLsizei count, GLenum type, const void *indices) { @autoreleasepool { CTX(); draw_elements(mode, count, type, indices, 1, 0); }}
+GLB(glDrawElementsInstanced, void, GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instances) { @autoreleasepool { CTX(); draw_elements(mode, count, type, indices, instances, 0); }}
+GLB(glDrawElementsBaseVertex, void, GLenum mode, GLsizei count, GLenum type, const void *indices, GLint bv) { @autoreleasepool { CTX(); draw_elements(mode, count, type, indices, 1, bv); }}
 
 // ---------- 查询对象（glGenQueries / glBeginQuery / glEndQuery / glGetQueryObject*） ----------
 // 遮挡（SAMPLES_PASSED / ANY_SAMPLES_PASSED(_CONSERVATIVE)）：Metal 可见性计数，结果 = 起止之间各计数格之和（ANY 类回 0 / 1）；

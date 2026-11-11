@@ -180,7 +180,7 @@
 "vpad.layouts.touch.note" = "For games with their own touch controls. The on-screen buttons turn off; hold four fingers for 1.5 s to switch back.";
 "vpad.menu.editDisabled" = "No buttons to edit in touch-only mode";
 "vpad.menu.face.letter" = "Map buttons by letter";
-"vpad.menu.face.letter.note" = "Xbox A is Switch A";
+"vpad.menu.face.letter.note" = "Xbox A and PlayStation × are Switch A";
 "vpad.menu.face.position" = "Map buttons by position";
 "vpad.menu.face.position.note" = "Buttons follow the Switch layout";
 "vpad.menu.gyro" = "Phone gyro";
@@ -224,12 +224,12 @@
 "about.unknown" = "Unknown";
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
+"app.fpsCap.ladder" = "This device can't hold 60 FPS steadily right now, so the game is back at its native frame rate. It will try 60 FPS again automatically once things are stable.";
 "app.fpsCap.lowPower" = "Low Power Mode is on, so the game is temporarily back at its native frame rate. 60 FPS resumes automatically when you turn off Low Power Mode.";
 "app.fpsCap.restored" = "60 FPS is back.";
 "app.fpsCap.thermal" = "The phone is too hot (critical), so the game is temporarily back at its native frame rate. 60 FPS resumes automatically once it cools down.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open the game again.";
 "app.gpuStop.title" = "Graphics error — stopped";
-"app.ladder.title" = "Graphics level";
 "app.library.broken.title" = "Game files are incomplete";
 "app.library.cantOpen" = "This game can’t be opened";
 "app.library.cantOpen.message" = "This game couldn’t be prepared to start. Swipe the app away in the app switcher and open it again; if it still fails, export diagnostics and send them to us.";
@@ -356,9 +356,8 @@
 "save.inspected" = "Backup checked. Waiting for your confirmation.";
 "save.intro" = "The game hasn’t started yet. You can export your save to Files, or import a .s2asave backup from a Mac or another device. Your current save is kept before restoring.";
 "save.journalUnreadable" = "Can’t read the save operation records folder (%@), so there’s no way to tell whether the last import / restore finished.\n%@";
-"save.location" = "Where the save files go: open the Files app → On My iPhone (On My iPad on iPad) → %@ → %@\n\nPut the save files straight into that last \"0\" folder. Copy the files already in it somewhere else first as a backup; when you're done, come back here and tap Start Game.\n\nCopying from a computer: on a Mac, select this device in the Finder sidebar → Files, drag the save folder onto \"%@\", then use the Files app to move the files into the \"0\" folder above.";
-"save.location.none" = "This game has no save folder yet: start the game and save once, then come back here to see the folder the save files go into.";
-"save.location.or" = "With more than one save, each numbered folder is a separate save (account save / device save); match the files the game already has:";
+"save.location" = "Save location: open the Files app → On My iPhone (On My iPad on iPad) → %@ → %@\n\nPut a save folder in its original format there (exported from a console, JKSV / Checkpoint and similar tools, or copied from the same game's SaveData on your computer) and the game uses it the next time you start. When you quit, it's updated with your latest progress; copy the whole folder to the same place on your computer or another device to keep playing.\n\nCopying from a computer: on a Mac, select this device in the Finder sidebar → Files, drag the folder onto \"%@\", then use the Files app to move it into the location above.";
+"save.location.problem" = "The save you put there last time wasn't loaded: %@. Your current save is unchanged.";
 "save.noRoot" = "Can’t access the save location, so saves can’t be imported or exported this time. You can close and reopen the app, or tap “Start game anyway…” to play as usual.";
 "save.noService" = "This package is missing the game identity or service needed to transfer saves. Repackage and install it with the latest S2Arm. Your current save still works as usual.";
 "save.noService.recover" = "This package is missing the game identity or service needed to transfer saves, so the interrupted save operation can’t be recovered.";
@@ -416,6 +415,8 @@
 "settings.toggle.devHud" = "Show S2Arm diagnostics overlay";
 "settings.toggle.diagOnOpen" = "Export diagnostics on next open";
 "settings.toggle.docked" = "Docked mode";
+"settings.toggle.diagRun" = "Diagnostic run (next session)";
+"settings.diagRun.note" = "Turn on, close the app from the app switcher and start this game again. Stay where the problem shows for at least 3 minutes, then export diagnostics. Applies to the next session only; that session runs slower.";
 "settings.docked.note" = "Sharper picture, but uses more power and runs hotter; not recommended on a phone";
 "settings.toggle.metalHud" = "Show Metal performance HUD";
 "settings.toggle.phoneHaptics" = "Phone haptics";

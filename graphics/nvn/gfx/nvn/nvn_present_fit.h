@@ -40,3 +40,9 @@ static inline pf_vp pf_viewport(double dw, double dh, double cw, double ch) {
 // height 1080, narrow screens keep width 1920, so one formula covers both); otherwise 16:9. 11-03 Duo (1920x1350) with the game drawing a taller
 // picture itself: the old width / 1080 gave 1.778 and squeezed the 1280x900 picture into a 16:9 layer with black above and below
 static inline double pf_out_aspect(int widened, int sw, int sh) { return widened && sw > 0 && sh > 0 ? (double)sw / (double)sh : 16.0 / 9.0; }
+
+// Whether a relayout of the output layer has to wait for the foreground (graphics/nvn/host_adapt.m s2a_direct_relayout). The root view is not laid out
+// while the app is in the background (the multitasking snapshot resizes it). A layer on the external display's view (ext) is never held back. A layer just
+// moved back to the root view (moved) is laid out at once when the root view's own scene is in the foreground (scene_fg): inside the external scene's
+// disconnect callback the app state reads background while the phone's scene is still foreground active, and no foreground notification follows
+static inline int pf_relayout_wait(int ext, int app_bg, int moved, int scene_fg) { return !ext && app_bg && !(moved && scene_fg); }

@@ -137,6 +137,27 @@ static int nvn_vk_compute_build_impl(struct s2a_vk_device *device,
                 request.json, request.json_bytes) != 0)
             diag_note("【红】唯一请求集发布失败");
     }
+    /* 程序级缓存（debug.s2a.compute_prog_cache，默认关）：identity 此刻已产出，命中即
+     * 短路 lookup/parse/对象创建——同一张有界表的 by_identity 条目（见 nvn_vk_compute.c）。
+     * 每笔状态（c0/c1/绑定快照/guest）不进键，命中路径仍按本次 dispatch 活状态逐笔填。 */
+    struct cpso *prog_hit = nvn_vk_compute_prog_lookup(device, request.identity);
+    if (prog_hit) {
+        s2a_w2_shader_lookup(&context, request.identity, S2A_W2_MEMO, 1);
+        out->diagnostic.source = S2A_COMPUTE_CACHED;
+        struct s2a_compute_diagnostic diagnostic = out->diagnostic;
+        int rc = 0;
+        if (s2a_vk_adapter_stop_requested()) {
+            nvn_vk_compute_prog_release(prog_hit);
+            rc = -1; snprintf(why, sizeof why, "compute execution stopped");
+        } else rc = nvn_vk_compute_pipeline_build_cached(device, state, memory, &snapshot,
+                    &request.source, prog_hit, out, why, sizeof why);
+        out->diagnostic = diagnostic;
+        nvk_compute_request_release(&request);
+        // 成功时 cached build 已接管快照（入参清零），这里是 no-op；失败/未走到时解除全部保活。
+        nvk_compute_texture_snapshot_release(&snapshot);
+        if (rc) return rejected(result, why[0] ? why : "compute build failed");
+        return 0;
+    }
     struct nvk_compute_lookup_options options = {0};
     const char *revision = getenv("S2A_SHADER_REVISION_ROOT");
     const char *cache = getenv("S2A_DIRECT_CACHE_DIR");
@@ -169,8 +190,8 @@ static int nvn_vk_compute_build_impl(struct s2a_vk_device *device,
         program.origin == NVK_COMPUTE_COMPILED ? S2A_COMPUTE_LIVE : S2A_COMPUTE_UNKNOWN;
     struct s2a_compute_diagnostic diagnostic = out->diagnostic;
     if (s2a_vk_adapter_stop_requested()) { rc = -1; snprintf(why, sizeof why, "compute execution stopped"); }
-    if (!rc) rc = nvn_vk_compute_pipeline_build(device, state, memory, &snapshot, &request.source,
-                                                &program, out, why, sizeof why);
+    if (!rc) rc = nvn_vk_compute_pipeline_build_prog(device, state, memory, &snapshot, &request.source,
+                                                &program, request.identity, out, why, sizeof why);
     out->diagnostic = diagnostic; /* pipeline may initialize its output; preserve facts on failure too. */
     free(program.bytes);
     nvk_compute_request_release(&request);

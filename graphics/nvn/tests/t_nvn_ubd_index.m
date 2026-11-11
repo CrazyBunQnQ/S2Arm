@@ -267,7 +267,11 @@ int main(void) { @autoreleasepool {
         CHECK(r == 1 && !memcmp(g_wd_cbv[0][5], want8, N8), "⑧ 第一次视图 %d 字节：返回 %d、内容%s同内存 + 更新", N8, r, r == 1 && !memcmp(g_wd_cbv[0][5], want8, N8) ? "" : "不");
         // (a) 两次视图之间没有任何写：影子是缓存里同一份，副本里已是它。指令数扣掉一对 instr() 本身（取最小的一次）
         uint64_t ov = ~0ull; for (int k = 0; k < 16; k++) { uint64_t x = instr(), y = instr(); if (y - x < ov) ov = y - x; }
-        uint64_t i0 = instr(); r = wd_cb_view(0, 5, D, N8); uint64_t ia = instr() - i0 - ov;
+        // 指令数取 8 次里最小的一次（11-10 负载 35–38 时单次读到 1354：线程被抢占 / 缺页的内核指令也记在本线程上；
+        //   无写再看是幂等的，8 次都应返回 2；真去整段再拷的话每一次都 ≥ 2048 条，取最小照样拦得住）
+        uint64_t i0, ia = ~0ull; int r2 = 2;
+        for (int k = 0; k < 8; k++) { i0 = instr(); r = wd_cb_view(0, 5, D, N8); uint64_t x = instr() - i0 - ov; if (x < ia) ia = x; if (r != 2) r2 = r; }
+        r = r2;
         CHECK(r == 2 && !memcmp(g_wd_cbv[0][5], want8, N8), "⑧(a) 无写再看：返回 %d（应 2 = 副本已是这份影子、内容与上次交出逐字节同）、内容%s同", r, !memcmp(g_wd_cbv[0][5], want8, N8) ? "" : "不");
         CHECK(ia < 1000, "⑧(a) 无写再看 %llu 条指令（判据 < 1000：副本已是这份影子不再拷；整段 32 KB 再拷一遍 ≥ 2048 条）", (unsigned long long)ia);
         // (b) 写落在别处（E）：这一段自上一份影子后没有新写，上一份就是答案（同一地址、不另做一份）
@@ -278,7 +282,9 @@ int main(void) { @autoreleasepool {
         CHECK(mb == 0 && c2 == c && g2 == g, "⑧(b) 别处写后再取：新做影子 %llu 份（应 0）、%s", (unsigned long long)mb, c2 == c ? "同一份" : "换了一份（整段重拷）");
         // (c) 同 (b) 但经宽屏视图：既不另做影子、也不再拷进副本
         mtl_sub_update(u2, E + 4096, 16);
-        m0 = g_ubp_made; i0 = instr(); r = wd_cb_view(0, 5, D, N8); uint64_t ic = instr() - i0 - ov;
+        m0 = g_ubp_made; uint64_t ic = ~0ull; r2 = 2;   // 同 (a)：取 8 次里最小的指令数，每次都应返回 2、不新做影子
+        for (int k = 0; k < 8; k++) { i0 = instr(); r = wd_cb_view(0, 5, D, N8); uint64_t x = instr() - i0 - ov; if (x < ic) ic = x; if (r != 2) r2 = r; }
+        r = r2;
         CHECK(r == 2 && !memcmp(g_wd_cbv[0][5], want8, N8) && g_ubp_made == m0 && ic < 1000, "⑧(c) 别处写后视图：返回 %d（应 2）、内容%s同、新做影子 %llu 份（应 0）、%llu 条指令（判据 < 1000）",
               r, !memcmp(g_wd_cbv[0][5], want8, N8) ? "" : "不", (unsigned long long)(g_ubp_made - m0), (unsigned long long)ic);
         // (d) 这一段有新写：照常续拼一份，副本跟着换

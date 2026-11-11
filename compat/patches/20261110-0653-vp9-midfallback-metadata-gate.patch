@@ -1,0 +1,20 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+index 71afdf023f9d683a69cc17ddf43f63871876dd93..ab513722b7f5e0c638f4c761808b6bda514d1c8d 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+@@ -81,10 +81,11 @@ namespace Ryujinx.Graphics.Nvdec
+         private void Fallback(string reason)
+         {
+             // A fallback while a native segment was running strands the guest MV/count state the managed
+-            // decoder would consume, freezing output until the next key frame. A stream that keeps hitting
+-            // this gets its native backend disabled for the rest of the context — every later GOP then runs
+-            // managed from the start instead of freezing its first frames over and over.
+-            bool midStream = _active;
++            // decoder would consume — but only on a backend that produces no guest metadata (MC). libvpx
++            // fills real MVs/counts, so its managed handoff stays exact and must keep the old
++            // "off until the next key frame" behavior — the disable bound below would otherwise
++            // permanently kill native decode on iOS/Mac after a few representable-gap events.
++            bool midStream = _active && !_backend.ProducesGuestMetadata;
+ 
+             Deactivate();
+             _backend.NoteFallback(reason);

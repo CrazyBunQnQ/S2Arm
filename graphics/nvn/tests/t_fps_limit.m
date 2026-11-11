@@ -76,6 +76,11 @@ static void delay(int frame) {
     if (check_hud && frame == 20) { struct timespec pause = {0, 200000000}; nanosleep(&pause, NULL); }
 }
 
+static double median10(const double *v) {   // 10 个数的中位数（第 5、6 小的均值）
+    double a[10]; memcpy(a, v, sizeof a);
+    for (int i = 1; i < 10; i++) for (int j = i; j > 0 && a[j - 1] > a[j]; j--) { double t = a[j]; a[j] = a[j - 1]; a[j - 1] = t; }
+    return (a[4] + a[5]) / 2;
+}
 static void dynamic_result(int phase, const double *times, uint64_t first, double hz) {
     // 期望来自60Hz游戏vsync：2/60、3/60，以及逐帧2↔3的均值，不从被测实现反推。
     const double expected[] = {1000.0 / 30, 50, 1000.0 / 30, 1000.0 / 24};
@@ -224,15 +229,15 @@ static void nvn_frames(void) {
         window_state(0, frames);
     }
     if (dynamic) {
-        double to20 = 0, to30 = 0;
-        for (int i = 1; i <= 10; i++) { to20 += transition[1][i]; to30 += transition[2][i]; }
-        to20 /= 10; to30 /= 10;
+        // 取第 1–10 帧单帧时长的中位数，不取均值（11-10 守望 3c25b2888：门禁机负载下 10 帧里一两帧被多拖一拍，均值 36.692 ms 越过 1.1 倍线 36.667 ms 判红）。
+        //   要分的是「立即按 60 Hz 等 2 / 3 拍」与旧行为「留在 30 Hz 等 2 拍 = 66.7 ms」：旧行为每帧都慢，中位数照样是 66.7，个别被拖的帧不动中位数
+        double to20 = median10(&transition[1][1]), to30 = median10(&transition[2][1]);
         // 11-04：低频档表示不了新周期就立即回 60 Hz，新周期从第一帧起就按自己的刻度（3 / 2 个 60 Hz 刻度），
         //   不再「首 10 帧仍按原 30 Hz 等 2 拍（66.7 ms）/ 原 20 Hz 等 1 拍（50 ms）」
         CHECK(to20 >= 50 * .90 && to20 <= 50 * 1.10,
-            "50ms新周期首10帧立即按60Hz等3拍：%.3f ms，期望50ms", to20);
+            "50ms新周期首10帧立即按60Hz等3拍（单帧中位）：%.3f ms，期望50ms", to20);
         CHECK(to30 >= (1000.0 / 30) * .90 && to30 <= (1000.0 / 30) * 1.10,
-            "33.3ms恢复首10帧立即按60Hz等2拍：%.3f ms，期望33.333ms", to30);
+            "33.3ms恢复首10帧立即按60Hz等2拍（单帧中位）：%.3f ms，期望33.333ms", to30);
     }
     if (dynamic) for (int phase = 0; phase < 4; phase++) {
         // 不丢过渡证据：SetInterval先于acquire，而link_sync仍在后面的present入口。
@@ -352,7 +357,7 @@ static void run(void) {
         }
         if (dynamic || deactivate || focus_probe || stall_probe || flap) {
             if (focus_probe && !focus_restored) puts("UNTESTED 真实失焦/恢复未完整命中，不激活App补造条件");
-            printf("fps limit: %d/%d passed\n", checked - failed, checked); fflush(stdout);
+            printf("fps limit: %d/%d passed\n", checked - failed, checked); printf("%s t_fps_limit\n", failed ? "✗" : "✓"); fflush(stdout);
             exit(failed ? 1 : focus_probe && !focus_restored ? 2 : 0);
         }
         double link_hz = link_end_ns > link_start_ns ? (link_end_n - link_start_n) * 1e9 / (link_end_ns - link_start_ns) : 0;
@@ -398,7 +403,7 @@ static void run(void) {
                 "实际显示周期 %.3f ms / %u 次；期望 %.3f ms", shown, intervals, display_ms);
         }
         if (check_hud) hud_result();
-        printf("fps limit: %d/%d passed\n", checked - failed, checked); fflush(stdout); exit(failed ? 1 : 0);
+        printf("fps limit: %d/%d passed\n", checked - failed, checked); printf("%s t_fps_limit\n", failed ? "✗" : "✓"); fflush(stdout); exit(failed ? 1 : 0);
     }
 }
 int main(int argc, char **argv) {

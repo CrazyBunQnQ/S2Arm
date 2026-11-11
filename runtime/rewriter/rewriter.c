@@ -40,11 +40,13 @@ typedef VEC(A) AV;
 typedef struct {
   A at;
   uint32_t w;
-  char m[32], op[160];
-  cs_arm64 d;
+  char m[16];
+  /* r18 / tgt：全量扫描的热路径（has18、直接跳转目标）在 decode 时顺手记下，不为它们重解详情（#509 合入时补：
+   * 详情改按需重解后常规游戏改写慢 18–36%）。tgt = 详情最后一个操作数的 imm，同原 target() 读法 */
+  uint8_t valid, sp, r18, has_tgt;
   Mask rd, wr;
   uint64_t regs;
-  int valid, sp;
+  A tgt;
 } Ins;
 typedef VEC(Ins) IV;
 typedef struct {
@@ -114,10 +116,22 @@ typedef union Alloc {
   max_align_t alignment;
 } Alloc;
 typedef struct {
+  cs_arm64 d;
+  A at;
+  uint32_t w;
+  char op[160];
+  int valid;
+} DetailCache;
+typedef struct {
   s2a_rewrite_request r;
   FILE *log, *out;
   csh cs;
   cs_insn* one;
+  DetailCache detail_cache[8];
+  unsigned detail_next;
+  A one_at;   /* g->one 里现在是哪条（decode / detail 解完记下）：decode 后紧接着取详情（自旋区分析）直接拷，不重解 */
+  uint32_t one_w;
+  int one_ok;
   jmp_buf err, local;
   int guarding, android, ohos, far, below, sdk_cut, signed_jt, acq_off, rel_off;
   /* 双补丁岛（原生层 10-30）：dual = 本轮前岛（基址前）与后岛（映像后）都是候选；patch / po 是当前岛，patch2 / po2 是另一个岛（切岛 = 整体交换），
@@ -539,15 +553,16 @@ static int decode(uint32_t w, A at, Ins* out) {
   const uint8_t* p = b;
   size_t n = 4;
   uint64_t a = at;
+  g->one_ok = 0;
   if (!cs_disasm_iter(g->cs, &p, &n, &a, g->one))
     return 0;
+  g->one_ok = 1, g->one_at = at, g->one_w = w;
   cs_insn* x = g->one;
   out->valid = 1;
   out->at = at;
   out->w = w;
+  REQUIRE(strlen(x->mnemonic) < sizeof(out->m));
   snprintf(out->m, sizeof(out->m), "%s", x->mnemonic);
-  snprintf(out->op, sizeof(out->op), "%s", x->op_str);
-  out->d = x->detail->arm64;
   cs_regs rd, wr;
   uint8_t nr = 0, nw = 0;
   REQUIRE(cs_regs_access(g->cs, x, rd, &nr, wr, &nw) == CS_ERR_OK);
@@ -562,18 +577,63 @@ static int decode(uint32_t w, A at, Ins* out) {
       out->wr |= BIT(k);
   }
   out->regs = (out->rd | out->wr) & 0x7fffffff;
-  for (const char* s = out->op; *s; s++)
+  for (const char* s = x->op_str; *s; s++)
     if (*s == 'x' || *s == 'w') {
       size_t n = 1 + strspn(s + 1, "0123456789");
-      if (n > 1 && n <= 3 && word_bounds(out->op, s, n)) {
+      if (n > 1 && n <= 3 && word_bounds(x->op_str, s, n)) {
         int k = atoi(s + 1);
         if (k < 31)
           out->regs |= BIT(k);
       }
     }
-  out->sp = find_word(out->op, "sp") != NULL || find_word(out->op, "wsp") != NULL;
+  out->sp = find_word(x->op_str, "sp") != NULL || find_word(x->op_str, "wsp") != NULL;
+  out->r18 = find_word(x->op_str, "x18") != NULL || find_word(x->op_str, "w18") != NULL;
+  if (x->detail && x->detail->arm64.op_count > 0) {
+    out->has_tgt = 1;
+    out->tgt = x->detail->arm64.operands[x->detail->arm64.op_count - 1].imm;
+  }
   return 1;
 }
+static const cs_arm64* detail(const Ins* in) {
+  for (size_t i = 0; i < sizeof(g->detail_cache) / sizeof(g->detail_cache[0]); i++) {
+    DetailCache* c = &g->detail_cache[i];
+    if (c->valid && c->at == in->at && c->w == in->w)
+      return &c->d;
+  }
+  {
+    DetailCache* c = &g->detail_cache[g->detail_next++ % (sizeof(g->detail_cache) / sizeof(g->detail_cache[0]))];
+    uint8_t b[4];
+    wr32(b, in->w);
+    const uint8_t* p = b;
+    size_t n = sizeof(b);
+    uint64_t at = (uint64_t)in->at;
+    if (!(g->one_ok && g->one_at == in->at && g->one_w == in->w)) {
+      g->one_ok = 0;
+      if (!cs_disasm_iter(g->cs, &p, &n, &at, g->one)) {   /* analyze 把解不出的字按 udf #0 记、w 留原字：详情同当时存下的 udf #0 */
+        wr32(b, 0);
+        p = b, n = sizeof(b), at = (uint64_t)in->at;
+        REQUIRE(cs_disasm_iter(g->cs, &p, &n, &at, g->one));
+      } else
+        g->one_ok = 1, g->one_at = in->at, g->one_w = in->w;
+    }
+    REQUIRE(g->one->detail);
+    c->d = g->one->detail->arm64;
+    c->at = in->at;
+    c->w = in->w;
+    memcpy(c->op, g->one->op_str, sizeof(c->op));
+    c->valid = 1;
+    return &c->d;
+  }
+}
+static const char* operand_text(const Ins* in) {
+  const cs_arm64* d = detail(in);
+  for (size_t i = 0; i < sizeof(g->detail_cache) / sizeof(g->detail_cache[0]); i++)
+    if (&g->detail_cache[i].d == d)
+      return g->detail_cache[i].op;
+  REQUIRE(0);
+  return "";
+}
+_Static_assert(sizeof(Ins) <= 80, "per-instruction state must stay compact for very large functions");
 static Ins dis(uint32_t w, A a) {
   Ins x;
   REQUIRE(decode(w, a, &x));
@@ -594,7 +654,7 @@ static int wconst(A at, int* reg, uint32_t* value) {
   if ((w & 0xff8003e0) == 0x320003e0) {
     Ins x;
     if (decode(w, at, &x)) {
-      const char* p = strrchr(x.op, '#');
+      const char* p = strrchr(operand_text(&x), '#');
       char* end;
       if (p && p[1]) {
         unsigned long v = strtoul(p + 1, &end, 0);
@@ -645,14 +705,14 @@ static void sdk_addr_cut(void) {
         int dst, src;
         char extra;
         if (at - a.at < 8 * 4 && eq(x.m, "add") &&
-            sscanf(x.op, "x%d, x1, x%d%c", &dst, &src, &extra) == 2 && src == a.reg)
+            sscanf(operand_text(&x), "x%d, x1, x%d%c", &dst, &src, &extra) == 2 && src == a.reg)
           add = 1;
         const char* suffix = "[x0, #0x28]";
-        size_t len = strlen(x.op), tail = strlen(suffix);
+        size_t len = strlen(operand_text(&x)), tail = strlen(suffix);
         if (at - a.at < 10 * 4 && in(x.m, "str|stp") && len >= tail &&
-            eq(x.op + len - tail, suffix))
+            eq(operand_text(&x) + len - tail, suffix))
           store = 1;
-        if (eq(x.m, "mov") && eq(x.op, "w2, #0x30"))
+        if (eq(x.m, "mov") && eq(operand_text(&x), "w2, #0x30"))
           node = 1;
       }
       if (add && store && node) {
@@ -690,7 +750,7 @@ static void sdk_addr_cut(void) {
   }
 }
 static int has18(const Ins* x) {
-  return find_word(x->op, "x18") != NULL || find_word(x->op, "w18") != NULL;
+  return x->r18;
 }
 static int writes(const Ins* x, int n) {
   return !!(x->wr & BIT(n));
@@ -705,8 +765,8 @@ static int direct(const Ins* x) {
   return isbr(x) && !in(x->m, "br|blr|ret");
 }
 static A target(const Ins* x) {
-  REQUIRE(x->d.op_count > 0);
-  return x->d.operands[x->d.op_count - 1].imm;
+  REQUIRE(x->has_tgt);
+  return x->tgt;
 }
 static void pick(uint64_t used, int* s, int* t) {
   *s = *t = -1;
@@ -724,13 +784,13 @@ static void pick(uint64_t used, int* s, int* t) {
 static uint32_t subst(const Ins* x, int s) {
   char want[160] = {0};
   size_t j = 0;
-  for (size_t i = 0; x->op[i] && j + 5 < sizeof(want);) {
-    if ((x->op[i] == 'x' || x->op[i] == 'w') && x->op[i + 1] == '1' && x->op[i + 2] == '8' &&
-        word_bounds(x->op, x->op + i, 3)) {
-      j += snprintf(want + j, sizeof(want) - j, "%c%d", x->op[i], s);
+  for (size_t i = 0; operand_text(x)[i] && j + 5 < sizeof(want);) {
+    if ((operand_text(x)[i] == 'x' || operand_text(x)[i] == 'w') && operand_text(x)[i + 1] == '1' && operand_text(x)[i + 2] == '8' &&
+        word_bounds(operand_text(x), operand_text(x) + i, 3)) {
+      j += snprintf(want + j, sizeof(want) - j, "%c%d", operand_text(x)[i], s);
       i += 3;
     } else
-      want[j++] = x->op[i++];
+      want[j++] = operand_text(x)[i++];
   }
   int pos[4], n = 0;
   for (int p = 0; p <= 16; p += (p == 10 ? 6 : 5))
@@ -746,10 +806,10 @@ static uint32_t subst(const Ins* x, int s) {
         if (mask & (1 << i))
           w = (w & ~(31u << pos[i])) | ((uint32_t)s << pos[i]);
       Ins d;
-      if (decode(w, x->at, &d) && eq(d.m, x->m) && eq(d.op, want))
+      if (decode(w, x->at, &d) && eq(d.m, x->m) && eq(operand_text(&d), want))
         return w;
     }
-  fail("subst fail %" PRIx64 " %s %s", (uint64_t)x->at, x->m, x->op);
+  fail("subst fail %" PRIx64 " %s %s", (uint64_t)x->at, x->m, operand_text(x));
   return 0;
 }
 static Site* site_at(A at) {
@@ -797,19 +857,19 @@ static void gate(const Ins* x, const char* k, int arg) {
 static int spdelta(const Ins* x) {
   if (!x->sp)
     return 0;
-  const char* p = find_word(x->op, "sp");
-  if (p && p > x->op && p[-1] == '[' && x->d.writeback) {
+  const char* p = find_word(operand_text(x), "sp");
+  if (p && p > operand_text(x) && p[-1] == '[' && detail(x)->writeback) {
     cs_arm64_op* m = NULL;
-    for (int i = 0; i < x->d.op_count; i++)
-      if (x->d.operands[i].type == ARM64_OP_MEM)
-        m = (cs_arm64_op*)&x->d.operands[i];
+    for (int i = 0; i < detail(x)->op_count; i++)
+      if (detail(x)->operands[i].type == ARM64_OP_MEM)
+        m = (cs_arm64_op*)&detail(x)->operands[i];
     REQUIRE(m);
     if (strstr(p, "]!"))
       return (int)m->mem.disp;
     if (strstr(p, "], #"))
-      return (int)x->d.operands[x->d.op_count - 1].imm;
+      return (int)detail(x)->operands[detail(x)->op_count - 1].imm;
   }
-  REQUIRE(!pre(x->op, "sp,") && !pre(x->op, "wsp,"));
+  REQUIRE(!pre(operand_text(x), "sp,") && !pre(operand_text(x), "wsp,"));
   return 0;
 }
 static int spframe(const Ins* x, uint32_t w, int dlt, int* F, uint32_t words[2], int* count) {
@@ -931,14 +991,14 @@ static void plain(const Ins* x) {
   /* 安卓/鸿蒙不产 below-sp 包：sp 改写点平移不了就 fail → 记缺口（make_pack 的红比废包强） */
   if (noredzone())
     fail("RuntimeError: %" PRIx64 " %s %s：x18 改写点 sp 形态不可平移",
-         (uint64_t)x->at, x->m, x->op);
+         (uint64_t)x->at, x->m, operand_text(x));
   /* 保留苹果路径的 sp 写回准入边界。 */
   REQUIRE(d >= -96 && d <= 400 && d % 8 == 0);
   /* 帧顶留出原 sp 下方的 128 字节。访存或运算读 sp 时，借 T 提供原 sp，
    * 把 K18 槽地址放在帧内第三个槽，原指令的立即数和索引方式都保留。 */
   F = 128 + (x->sp ? 32 : 16);
   if (x->sp) {
-    REQUIRE(!x->d.post_index || x->d.operands[x->d.op_count - 1].type == ARM64_OP_IMM);
+    REQUIRE(!detail(x)->post_index || detail(x)->operands[detail(x)->op_count - 1].type == ARM64_OP_IMM);
     REQUIRE(((w >> 5) & 31) == 31);
     w = (w & ~(31u << 5)) | ((uint32_t)T << 5);
     REQUIRE(!dis(w, x->at).sp);
@@ -1001,7 +1061,7 @@ static void pcrel(const Ins* x) {
   stash(0, 1, noredzone());
   tp(1, 0);
   slot(1, 0, 0);
-  A t = x->d.operands[1].imm;
+  A t = detail(x)->operands[1].imm;
   emit(adrp(0, here(), t));
   if (eq(x->m, "adr"))
     emit(ADDI(0, 0, t & 4095, 0));
@@ -1315,7 +1375,7 @@ static int win_frame(const Window* w) {
           minoff = off;
       } else if (!addsub_sp(x->w))
         fail("RuntimeError: %" PRIx64 " %s %s：窗口内 sp 形态不可平移",
-             (uint64_t)x->at, x->m, x->op);
+             (uint64_t)x->at, x->m, operand_text(x));
     }
   int F = minoff < 0 ? ((16 - minoff + 15) / 16) * 16 : 16;
   if (F > 504)
@@ -1326,7 +1386,7 @@ static int win_frame(const Window* w) {
       uint32_t o;
       if (x->sp && !sp_shift(x->w, F, &o))
         fail("RuntimeError: %" PRIx64 " %s %s：窗口内 sp 访存抬 0x%x 编不进",
-             (uint64_t)x->at, x->m, x->op, F);
+             (uint64_t)x->at, x->m, operand_text(x), F);
     }
   return F;
 }
@@ -1390,7 +1450,7 @@ static void window_emit(Window* w) {
         Ins d = dis(v, here());
         REQUIRE(eq(d.m, x->m) && target(&d) == nt);
       } else
-        REQUIRE(!in(x->m, "adr|adrp|b|bl|br|blr|ret") && !(eq(x->m, "ldr") && !strchr(x->op, '[')));
+        REQUIRE(!in(x->m, "adr|adrp|b|bl|br|blr|ret") && !(eq(x->m, "ldr") && !strchr(operand_text(x), '[')));
       emit(v);
     }
     emit(STR(S, T, 0));
@@ -1588,6 +1648,19 @@ static Pair func_of(A at) {
     covered = 1;
   AV* b = covered ? &g->starts : &g->bounds;
   size_t i = upper(b, at);
+  /* Some NSOs have one unwind-covered tail spanning most of __text but no
+   * per-function FDEs. Treating that tail as one function makes CFG analysis
+   * quadratic on large modules. In that pathological case, use the existing
+   * call-target/FDE boundary set, as we already do for uncovered code. */
+  if (covered) {
+    A a = i ? b->v[i - 1] : at;
+    A end = i < b->n ? b->v[i] : (A)g->text;
+    if (end - a > 16 * 1024 * 1024) {
+      b = &g->bounds;
+      i = upper(b, at);
+      covered = 0;
+    }
+  }
   Pair r = {i ? b->v[i - 1] : (covered ? at : 0), i < b->n ? b->v[i] : (A)g->text};
   if (covered && !i)
     r.b = at + 4;
@@ -1828,23 +1901,23 @@ static int def(const IV* l, int end, int lo, int r) {
   return -1;
 }
 static int rno(const Ins* x, int op) {
-  return op < x->d.op_count && x->d.operands[op].type == ARM64_OP_REG
-             ? regnum(x->d.operands[op].reg)
+  return op < detail(x)->op_count && detail(x)->operands[op].type == ARM64_OP_REG
+             ? regnum(detail(x)->operands[op].reg)
              : -1;
 }
 static int regimm(const Ins* x, const char* m, int r, int rr) {
   return eq(x->m, m) && rno(x, 0) == r && (rr < 0 || rno(x, 1) == rr) &&
-         x->d.op_count == (rr < 0 ? 2 : 3) && x->d.operands[rr < 0 ? 1 : 2].type == ARM64_OP_IMM &&
-         !strstr(x->op, "lsl");
+         detail(x)->op_count == (rr < 0 ? 2 : 3) && detail(x)->operands[rr < 0 ? 1 : 2].type == ARM64_OP_IMM &&
+         !strstr(operand_text(x), "lsl");
 }
 static int regadd(const Ins* x, int d, int a, int b, int shift) {
   return eq(x->m, "add") && rno(x, 0) == d && rno(x, 1) == a && rno(x, 2) == b &&
-         x->d.op_count == 3 && x->d.operands[2].shift.value == (unsigned)shift;
+         detail(x)->op_count == 3 && detail(x)->operands[2].shift.value == (unsigned)shift;
 }
 static int ldrsw(const Ins* x, int* T, int* B, int* I) {
-  if (!eq(x->m, "ldrsw") || x->d.op_count != 2 || x->d.operands[1].type != ARM64_OP_MEM)
+  if (!eq(x->m, "ldrsw") || detail(x)->op_count != 2 || detail(x)->operands[1].type != ARM64_OP_MEM)
     return 0;
-  cs_arm64_op* p = (cs_arm64_op*)&x->d.operands[1];
+  cs_arm64_op* p = (cs_arm64_op*)&detail(x)->operands[1];
   *T = rno(x, 0);
   *B = regnum(p->mem.base);
   *I = regnum(p->mem.index);
@@ -1858,7 +1931,7 @@ static int chain(const IV* l, int end, int r, int maxback, A* tbl, int* pageinde
   int p = def(l, a, lo, r);
   if (p < 0 || !eq(l->v[p].m, "adrp") || rno(l->v + p, 0) != r)
     return 0;
-  *tbl = l->v[p].d.operands[1].imm + l->v[a].d.operands[2].imm;
+  *tbl = detail(&l->v[p])->operands[1].imm + detail(&l->v[a])->operands[2].imm;
   if (pageindex)
     *pageindex = p;
   return 1;
@@ -1948,7 +2021,7 @@ static int joinbound(const IV* l, const AV* tg, A J, int I) {
     for (int p = (int)q - 1; p >= 0 && p >= (int)q - 8; p--) {
       const Ins* y = l->v + p;
       if (regimm(y, "cmp", I, -1)) {
-        c = (int)y->d.operands[1].imm + eq(x->m, "b.ls");
+        c = (int)detail(y)->operands[1].imm + eq(x->m, "b.ls");
         break;
       }
       if (writes(y, I) || isbr(y) || has(tg, l->v[p + 1].at) || in(y->m, "cmp|cmn|tst|ccmp|ccmn") || pre(y->m, "subs") ||
@@ -1982,20 +2055,20 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
   Ins* dx = l->v + k;
   /* 尾调用：x18 由一次从内存取数给出（ldr x18, [Xn, #imm]，或 ldp 一次取「函数指针 + 另一字」，如 IL2CPP 虚调用表项
    * {方法指针, 方法数据}，x0–x17 全占着时编译器把指针放 x18），之后不再碰 x18、br x18 跳出 */
-  int ld1 = eq(dx->m, "ldr") && rno(dx, 0) == 18 && dx->d.op_count == 2 && dx->d.operands[1].type == ARM64_OP_MEM;
-  int ld2 = eq(dx->m, "ldp") && dx->op[0] == 'x' && (rno(dx, 0) == 18 || rno(dx, 1) == 18) && rno(dx, 0) != rno(dx, 1) &&
-            dx->d.op_count == 3 && dx->d.operands[2].type == ARM64_OP_MEM;
-  const cs_arm64_op* mo = ld1 ? &dx->d.operands[1] : ld2 ? &dx->d.operands[2] : NULL;
-  if (mo && regnum(mo->mem.base) != 18 && (!ld2 || regnum(mo->mem.base) >= 0) && !mo->mem.index && !dx->d.writeback) {   /* ldp 基址要通用寄存器（同 Python 对照实现的写法，不认 sp） */
+  int ld1 = eq(dx->m, "ldr") && rno(dx, 0) == 18 && detail(dx)->op_count == 2 && detail(dx)->operands[1].type == ARM64_OP_MEM;
+  int ld2 = eq(dx->m, "ldp") && operand_text(dx)[0] == 'x' && (rno(dx, 0) == 18 || rno(dx, 1) == 18) && rno(dx, 0) != rno(dx, 1) &&
+            detail(dx)->op_count == 3 && detail(dx)->operands[2].type == ARM64_OP_MEM;
+  const cs_arm64_op* mo = ld1 ? &detail(dx)->operands[1] : ld2 ? &detail(dx)->operands[2] : NULL;
+  if (mo && regnum(mo->mem.base) != 18 && (!ld2 || regnum(mo->mem.base) >= 0) && !mo->mem.index && !detail(dx)->writeback) {   /* ldp 基址要通用寄存器（同 Python 对照实现的写法，不认 sp） */
     for (int q = k + 1; q < j; q++)
       if (reads(l->v + q, 18) || writes(l->v + q, 18))
         BAD("尾调用形态中间又碰了 x18");
     out->type = 4;
     return 1;
   }
-  if (!eq(dx->m, "add") || rno(dx, 0) != 18 || dx->d.op_count != 3 || rno(dx, 1) < 0 ||
-      rno(dx, 2) < 0 || dx->d.operands[2].shift.value)
-    BAD("x18 最后由 %s %s 给出，不是已知形态", dx->m, dx->op);
+  if (!eq(dx->m, "add") || rno(dx, 0) != 18 || detail(dx)->op_count != 3 || rno(dx, 1) < 0 ||
+      rno(dx, 2) < 0 || detail(dx)->operands[2].shift.value)
+    BAD("x18 最后由 %s %s 给出，不是已知形态", dx->m, operand_text(dx));
   int ka = k, r1 = rno(dx, 1), r2 = rno(dx, 2), k0 = -1, T = -1, B = -1, I = -1;
   /* 表基址可经一次 64 位寄存器拷贝到 add（女神异闻录5 乱战 main 0x494864–0x4948e0：ldrsw x9,[x10,x9,lsl#2] / mov x12,x10 /
    * mov w10,w0 / add x18,x9,x12——x10 随后被另作他用，编译器先把基址拷进 x12）。cq = 拷贝所在下标，cd = 拷贝目的寄存器 */
@@ -2021,7 +2094,7 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
         Ins* y = l->v + p2;
         if (isbr(y) || has(&tg, l->v[p2 + 1].at))
           break;
-        if (eq(y->m, "mov") && y->op[0] == 'x' && y->d.op_count == 2 && rno(y, 0) == o && rno(y, 1) == b) {
+        if (eq(y->m, "mov") && operand_text(y)[0] == 'x' && detail(y)->op_count == 2 && rno(y, 0) == o && rno(y, 1) == b) {
           pre = p2;
           break;
         }
@@ -2040,7 +2113,7 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
       }
     }
     int cs = rno(x, 1);
-    if (cq < 0 && eq(x->m, "mov") && x->op[0] == 'x' && x->d.op_count == 2 && cs >= 0 && (rno(x, 0) == r1 || rno(x, 0) == r2)) {
+    if (cq < 0 && eq(x->m, "mov") && operand_text(x)[0] == 'x' && detail(x)->op_count == 2 && cs >= 0 && (rno(x, 0) == r1 || rno(x, 0) == r2)) {
       cq = q;
       cd = rno(x, 0);
       csrc = cs;
@@ -2076,8 +2149,8 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
   for (int q = k0 + 1; q < j; q++)
     if (q != ka) {
       Ins* x = l->v + q;
-      if (!midok(x) || (!strchr(x->op, '[') && (pre(x->m, "ld") || pre(x->m, "st"))))
-        BAD("中间指令不可搬移 %" PRIx64 " %s %s", (uint64_t)x->at, x->m, x->op);
+      if (!midok(x) || (!strchr(operand_text(x), '[') && (pre(x->m, "ld") || pre(x->m, "st"))))
+        BAD("中间指令不可搬移 %" PRIx64 " %s %s", (uint64_t)x->at, x->m, operand_text(x));
       /* x16 / x17 可以搬：brrel 先还原 x16 / x17 原值再执行搬来的指令，之后把它们的新值存回槽、每个落点还原后再跳（10-26 普查
        * 010095300B6A4000 / 0100C1F0051B6000：编译器把 mov/movk w16、mov w17 排在取表与 br 之间，跳转目标要读）。
        * x18 搬过去碰的是真寄存器而不是虚拟 x18 槽、sp 下方是暂存槽，这两类仍不能搬 */
@@ -2138,7 +2211,7 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
         if (has(&tg, y->at))
           break;
         if (in(y->m, "b.hi|b.hs")) {
-          cnt = (int)x->d.operands[1].imm + eq(y->m, "b.hi");
+          cnt = (int)detail(x)->operands[1].imm + eq(y->m, "b.hi");
           break;
         }
         if (writes(y, I) || isbr(y) || !midok(y) || in(y->m, "cmp|cmn|tst") ||
@@ -2194,7 +2267,7 @@ static int compact(const IV* l, int j, Pair f, Jump* out) {
     return 0;
   Ins* z = l->v + ld;
   int width = in(z->m, "ldrb|ldrsb") ? 256 : in(z->m, "ldrh|ldrsh") ? 65536 : 0;
-  A b = l->v[adr].d.operands[1].imm;
+  A b = detail(&l->v[adr])->operands[1].imm;
   if (!width || b < f.a || b >= f.b || b % 4)
     return 0;
   /* 缺省 bias=0：ldrsb/ldrsh 仍按无符号宽度铺垫，产物与原先逐字节相同。
@@ -2206,8 +2279,8 @@ static int compact(const IV* l, int j, Pair f, Jump* out) {
   int bias = 0;
   if (g->signed_jt) {
     /* 已知配对才铺垫。表外组合（含 W 目的的 ldrsb/ldrsh 再 lsl #2）返回 0，后面记缺口。 */
-    int ext = x->d.operands[2].ext;
-    int xdst = z->op[0] == 'x';
+    int ext = detail(x)->operands[2].ext;
+    int xdst = operand_text(z)[0] == 'x';
     int known = 0;
     /* 无符号加载已经清零扩展；这些扩展不会引入负偏移，保持原无符号垫。 */
     if ((eq(z->m, "ldrb") && (ext == ARM64_EXT_UXTW || ext == ARM64_EXT_SXTW)) ||
@@ -2250,8 +2323,8 @@ static int classify(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) 
     return 1;
   for (int q = j - 1; q >= 0; q--) {
     Ins* x = l->v + q;
-    if (pre(x->op, "x18,")) {
-      if (in(x->m, "ldr|ldur") && strchr(x->op, '[') && !find_word(x->op, "x18, lsl")) {
+    if (pre(operand_text(x), "x18,")) {
+      if (in(x->m, "ldr|ldur") && strchr(operand_text(x), '[') && !find_word(operand_text(x), "x18, lsl")) {
         out->type = 4;
         return 1;
       }
@@ -2275,15 +2348,15 @@ static int classify(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) 
     if (regimm(l->v + q, "add", B, B)) {
       for (int p = q - 1; p >= MAX(0, q - 6); p--)
         if (eq(l->v[p].m, "adrp") && rno(l->v + p, 0) == B) {
-          tbl = l->v[p].d.operands[1].imm + l->v[q].d.operands[2].imm;
+          tbl = detail(&l->v[p])->operands[1].imm + detail(&l->v[q])->operands[2].imm;
           break;
         }
       if (tbl)
         break;
     }
   for (int q = j - 3; q > MAX(0, j - 8); q--)
-    if (regimm(l->v + q, "cmp", 18, -1) && pre(l->v[q].op, "w18,") && eq(l->v[q + 1].m, "b.hi")) {
-      cnt = l->v[q].d.operands[1].imm + 1;
+    if (regimm(l->v + q, "cmp", 18, -1) && pre(operand_text(&l->v[q]), "w18,") && eq(l->v[q + 1].m, "b.hi")) {
+      cnt = detail(&l->v[q])->operands[1].imm + 1;
       break;
     }
   if (!tbl || !cnt)
@@ -2338,18 +2411,18 @@ static int jt_targets(const IV* l, int j, AV* out) {
   for (int q = ld - 1; q >= lo; q--) {
     Ins* x = l->v + q;
     int r = rno(x, 0), s = rno(x, 1);
-    if (eq(x->m, "mov") && r >= 0 && s >= 0 && pre(x->op, "w") && (idx & BIT(r))) {
+    if (eq(x->m, "mov") && r >= 0 && s >= 0 && pre(operand_text(x), "w") && (idx & BIT(r))) {
       idx |= BIT(s);
       continue;
     }
-    if (eq(x->m, "and") && r >= 0 && s >= 0 && x->d.op_count == 3 &&
-        x->d.operands[2].type == ARM64_OP_IMM && (idx & BIT(r)) && masked < 0) {
+    if (eq(x->m, "and") && r >= 0 && s >= 0 && detail(x)->op_count == 3 &&
+        detail(x)->operands[2].type == ARM64_OP_IMM && (idx & BIT(r)) && masked < 0) {
       masked = s;
-      mask = x->d.operands[2].imm;
+      mask = detail(x)->operands[2].imm;
       maskpos = q;
       continue;
     }
-    if (!eq(x->m, "cmp") || r < 0 || !pre(x->op, "w") || x->d.operands[1].type != ARM64_OP_IMM)
+    if (!eq(x->m, "cmp") || r < 0 || !pre(operand_text(x), "w") || detail(x)->operands[1].type != ARM64_OP_IMM)
       continue;
     if (idx & BIT(r)) {
       ci = q;
@@ -2359,8 +2432,8 @@ static int jt_targets(const IV* l, int j, AV* out) {
       for (int p = q - 1; p >= lo; p--)
         if (writes(l->v + p, r)) {
           Ins* y = l->v + p;
-          int good = eq(y->m, "and") && rno(y, 1) == masked && y->d.op_count == 3 &&
-                     y->d.operands[2].type == ARM64_OP_IMM && y->d.operands[2].imm == mask;
+          int good = eq(y->m, "and") && rno(y, 1) == masked && detail(y)->op_count == 3 &&
+                     detail(y)->operands[2].type == ARM64_OP_IMM && detail(y)->operands[2].imm == mask;
           for (int z = p + 1; good && z < maskpos; z++)
             if (writes(l->v + z, masked))
               good = 0;
@@ -2377,7 +2450,7 @@ static int jt_targets(const IV* l, int j, AV* out) {
   int n = 0;
   for (int q = ci + 1; q < ld; q++) {
     if (in(l->v[q].m, "b.hi|b.hs")) {
-      n = l->v[ci].d.operands[1].imm + eq(l->v[q].m, "b.hi");
+      n = detail(&l->v[ci])->operands[1].imm + eq(l->v[q].m, "b.hi");
       break;
     }
     if (isbr(l->v + q))
@@ -2395,6 +2468,28 @@ static int jt_targets(const IV* l, int j, AV* out) {
 }
 /* Static predecessor traversal for table base recovery. No path is invented
  * for a block that is only reachable through another indirect jump table. */
+static void reachdefs_edge(const IV* l, int dst, int r, int q, int* seen, AV* result, AV* todo,
+                           int* count) {
+  if (q < 0 || (size_t)q >= l->n)
+    return;
+  Ins* x = l->v + q;
+  int edge = (direct(x) && !eq(x->m, "bl") && target(x) == l->v[dst].at) ||
+             (q + 1 == dst && !in(x->m, "b|br|ret"));
+  if (!edge)
+    return;
+  (*count)++;
+  if (seen[q])
+    return;
+  seen[q] = 1;
+  if (writes(x, r)) {
+    if (!contains(result, q))
+      PUSH(*result, q);
+  } else {
+    if (q == 0 && !contains(result, -1))
+      PUSH(*result, -1);
+    PUSH(*todo, (A)q);
+  }
+}
 static AV reachdefs(const IV* l, int k, int r) {
   AV result = {0}, todo = {0};
   int* seen = zalloc(l->n * sizeof(int));
@@ -2404,28 +2499,27 @@ static AV reachdefs(const IV* l, int k, int r) {
   while (todo.n) {
     int dst = (int)todo.v[--todo.n];
     int count = 0;
-    for (size_t q = 0; q < l->n; q++) {
-      Ins* x = l->v + q;
-      int edge = (direct(x) && !eq(x->m, "bl") && target(x) == l->v[dst].at) ||
-                 (q + 1 == (size_t)dst && !in(x->m, "b|br|ret"));
-      if (!edge)
-        continue;
-      count++;
-      if (seen[q])
-        continue;
-      seen[q] = 1;
-      if (writes(x, r)) {
-        if (!contains(&result, q))
-          PUSH(result, q);
-      } else {
-        if (q == 0 && !contains(&result, -1))
-          PUSH(result, -1);
-        PUSH(todo, (A)q);
+    if (fn_indexed(l)) {
+      A at = l->v[dst].at;
+      size_t i = upper(&g->ftg, at);
+      if (i && g->ftg.v[i - 1] == at)
+        for (size_t e = g->fsrc_at[i - 1]; e < g->fsrc_at[i]; e++)
+          reachdefs_edge(l, dst, r, g->fsrc[e], seen, &result, &todo, &count);
+      if (dst > 0) {
+        int q = dst - 1;
+        Ins* x = l->v + q;
+        if (!(direct(x) && !eq(x->m, "bl") && target(x) == at))
+          reachdefs_edge(l, dst, r, q, seen, &result, &todo, &count);
       }
+    } else {
+      for (size_t q = 0; q < l->n; q++)
+        reachdefs_edge(l, dst, r, (int)q, seen, &result, &todo, &count);
     }
     if (!count && dst != k && !contains(&result, -1))
       PUSH(result, -1);
   }
+  release(seen);
+  release(todo.v);
   return result;
 }
 /* One shared visited set and value union computes copy propagation through
@@ -2435,6 +2529,7 @@ static int reg_vals(const IV* l, int k, int r, int depth, Mask* seen, AV* vals, 
   sort(&rd);
   if (rd.n == 1 && rd.v[0] == -1) {
     *why = format("表基址 x%d 沿控制流往回到函数头都没写（0x%" PRIx64 " 起）", r, (uint64_t)l->v[0].at);
+    release(rd.v);
     return 0;
   }
   for (size_t i = 0; i < rd.n; i++) {
@@ -2446,24 +2541,28 @@ static int reg_vals(const IV* l, int k, int r, int depth, Mask* seen, AV* vals, 
     seen[ka] |= BIT(r);
     Ins* x = l->v + ka;
     int src = rno(x, 1);
-    if (eq(x->m, "mov") && x->d.op_count == 2 && rno(x, 0) == r && src >= 0 &&
-        pre(x->op, "x")) {
+    if (eq(x->m, "mov") && detail(x)->op_count == 2 && rno(x, 0) == r && src >= 0 &&
+        pre(operand_text(x), "x")) {
       if (depth <= 0) {
         *why = format("表基址 x%d 的到达定义 0x%" PRIx64 " mov %s 拷贝链超过 16 层",
-                      r, (uint64_t)x->at, x->op);
+                      r, (uint64_t)x->at, operand_text(x));
+        release(rd.v);
         return 0;
       }
       char* nested = NULL;
       if (!reg_vals(l, ka, src, depth - 1, seen, vals, &nested)) {
         *why = format("表基址 x%d 的到达定义 0x%" PRIx64 " mov %s：%s",
-                      r, (uint64_t)x->at, x->op, nested);
+                      r, (uint64_t)x->at, operand_text(x), nested);
+        release(nested);
+        release(rd.v);
         return 0;
       }
       continue;
     }
-    if (!regimm(x, "add", r, r) || !pre(x->op, "x")) {
+    if (!regimm(x, "add", r, r) || !pre(operand_text(x), "x")) {
       *why = format("表基址 x%d 的到达定义 0x%" PRIx64 " %s %s 不是 add x%d,x%d,#lo 或 mov 拷贝",
-                    r, (uint64_t)x->at, x->m, x->op, r, r);
+                    r, (uint64_t)x->at, x->m, operand_text(x), r, r);
+      release(rd.v);
       return 0;
     }
     int p = -1;
@@ -2479,17 +2578,22 @@ static int reg_vals(const IV* l, int k, int r, int depth, Mask* seen, AV* vals, 
     if (p < 0) {
       *why = format("表基址 x%d 的到达定义 0x%" PRIx64 " 前同块没有 adrp x%d",
                     r, (uint64_t)x->at, r);
+      release(rd.v);
       return 0;
     }
-    PUSH(*vals, l->v[p].d.operands[1].imm + x->d.operands[2].imm);
+    PUSH(*vals, detail(&l->v[p])->operands[1].imm + detail(x)->operands[2].imm);
   }
+  release(rd.v);
   return 1;
 }
 static int reg_const(const IV* l, int k, int r, A* tbl, char** why) {
   AV vals = {0};
   Mask* seen = zalloc(l->n * sizeof(*seen));
-  if (!reg_vals(l, k, r, 16, seen, &vals, why))
+  if (!reg_vals(l, k, r, 16, seen, &vals, why)) {
+    release(seen);
+    release(vals.v);
     return 0;
+  }
   sort(&vals);
   if (vals.n != 1) {
     REQUIRE(vals.n <= (SIZE_MAX - 1) / 22);
@@ -2503,16 +2607,21 @@ static int reg_const(const IV* l, int k, int r, A* tbl, char** why) {
     }
     *why = format("表基址 x%d 有 %zu 个不同的到达值（%s）", r, vals.n,
                   vals.n ? values : "拷贝链成环、没有常量来源");
+    release(values);
+    release(seen);
+    release(vals.v);
     return 0;
   }
   *tbl = vals.v[0];
+  release(seen);
+  release(vals.v);
   return 1;
 }
 /* Preserve linear recovery before the CFG copy-propagation fallback. */
 static int jt_base(const IV* l, int k, int r, A* tbl, char** why) {
   int lo = MAX(0, k - 256), a = def(l, k, lo, r);
   *why = NULL;
-  if (a >= 0 && regimm(l->v + a, "add", r, r) && pre(l->v[a].op, "x") &&
+  if (a >= 0 && regimm(l->v + a, "add", r, r) && pre(operand_text(&l->v[a]), "x") &&
       chain(l, k, r, 256, tbl, NULL))
     return 1;
   return reg_const(l, k, r, tbl, why);
@@ -2583,7 +2692,7 @@ static int jt_adr(const IV* l, int j, Pair f, AV* out) {
   int d = def(l, a, lo, 18);
   if (d < 0 || !eq(l->v[d].m, "adr") || rno(l->v + d, 0) != 18)
     return 0;
-  A L = l->v[d].d.operands[1].imm;
+  A L = detail(&l->v[d])->operands[1].imm;
   int ld = def(l, a, lo, T);
   if (ld < 0)
     return 0;
@@ -2624,6 +2733,12 @@ static void analyze(void) {
       continue;
     REQUIRE(f.a >= 0 && f.b >= f.a && (uint64_t)f.b <= g->len);
     IV l = {0};
+    size_t nins = (size_t)((f.b - f.a) / 4);
+    REQUIRE(nins <= SIZE_MAX / sizeof(*l.v));
+    if (nins) {
+      l.v = resize(NULL, nins * sizeof(*l.v));
+      l.cap = nins;
+    }
     for (A a = f.a; a + 4 <= f.b; a += 4) {
       Ins x;
       /* 函数中间解不出的字（未分配编码，执行即陷入，如 0xe7ffdefe：编译器放在不返回的调用之后）按 udf #0 记，函数照样往下读：
@@ -2648,7 +2763,7 @@ static void analyze(void) {
           done(ws.v[k].seg.v[s].ins.v[i].at);
     }
     for (size_t j = 0; j < l.n; j++)
-      if (eq(l.v[j].m, "br") && eq(l.v[j].op, "x18")) {
+      if (eq(l.v[j].m, "br") && eq(operand_text(&l.v[j]), "x18")) {
         Jump jump = {0};
         jump.at = l.v[j].at;
         char why[600] = {0};
@@ -2797,7 +2912,7 @@ static void gensite(Site* s) {
   }
   if (in(s->kind, "cntpct|cntvct|ctr|tpidr_w") && N == 18)
     fail("RuntimeError: %" PRIx64 " %s %s：系统寄存器读写的 x18 须走线程槽，块未实现",
-         (uint64_t)s->at, x.m, x.op);
+         (uint64_t)s->at, x.m, operand_text(&x));
   if (eq(s->kind, "x18")) {
     if (eq(x.m, "br")) {
       Jump* j = jump_at(s->at);
@@ -2825,12 +2940,12 @@ static void gensite(Site* s) {
     } else if (in(x.m, "adr|adrp")) {
       pcrel(&x);
       bump("pcrel");
-    } else if (eq(x.m, "blr") && eq(x.op, "x18")) {
+    } else if (eq(x.m, "blr") && eq(operand_text(&x), "x18")) {
       dynbr(&x, 1);
       bump("blr");
-    } else if (in(x.m, "blr|ret|b|bl") || (eq(x.m, "ldr") && !strchr(x.op, '[')))
-      fail("RuntimeError: %" PRIx64 " %s %s", (uint64_t)s->at, x.m, x.op);
-    else if (pre(x.op, "sp, ") || pre(x.op, "wsp, ")) {
+    } else if (in(x.m, "blr|ret|b|bl") || (eq(x.m, "ldr") && !strchr(operand_text(&x), '[')))
+      fail("RuntimeError: %" PRIx64 " %s %s", (uint64_t)s->at, x.m, operand_text(&x));
+    else if (pre(operand_text(&x), "sp, ") || pre(operand_text(&x), "wsp, ")) {
       spfrom18(&x);
       bump("sp18");
     } else {
@@ -3014,7 +3129,7 @@ static void sdk_aregion(void) {
     Ins x;
     if (at + 4 > value + size || !decode(iw(at), at, &x))
       break;
-    if (!eq(x.m, "ret") || x.op[0] || consumed(at))
+    if (!eq(x.m, "ret") || operand_text(&x)[0] || consumed(at))
       continue;
     if (!unit_run(at, gen_aregion, &at, NULL))
       gap(at, "aregion", "AssertionError: %s", g->error);
@@ -3218,7 +3333,7 @@ static const char* cp_check(uint32_t w, A a) {
   if ((w & 0x3b000000u) == 0x18000000u) return ((w >> 26) & 1) && (w >> 30) == 3 ? "字面量编码不认" : NULL;
   Ins x = dis(w, a);
   if (!x.valid) return "解不出";
-  if (has18(&x) || eq(x.m, "svc") || ((eq(x.m, "mrs") || eq(x.m, "msr")) && strstr(x.op, "tpidr"))) return "要翻译";
+  if (has18(&x) || eq(x.m, "svc") || ((eq(x.m, "mrs") || eq(x.m, "msr")) && strstr(operand_text(&x), "tpidr"))) return "要翻译";
   return NULL;
 }
 static void cp_emit(uint32_t w, A a) { /* 把原在 a 的指令字 w 等价地发进跳板（PC 相对的重定位；先过 cp_check） */
@@ -3621,8 +3736,8 @@ static int spin_kind(const Ins* x) {
       pre(x->m, "ldsmin") || pre(x->m, "ldumax") || pre(x->m, "ldumin"))
     return 0;
   int mem = 0;
-  for (int i = 0; i < x->d.op_count; i++)
-    if (x->d.operands[i].type == ARM64_OP_MEM)
+  for (int i = 0; i < detail(x)->op_count; i++)
+    if (detail(x)->operands[i].type == ARM64_OP_MEM)
       mem = 1;
   if (pre(x->m, "ld") || pre(x->m, "prfm") || pre(x->m, "prfum"))
     return mem ? 1 : 0;
@@ -3631,9 +3746,9 @@ static int spin_kind(const Ins* x) {
 static void spin_rw(const Ins* x, Mask* r, Mask* w) {
   Mask ops = 0, first = 0, rest = 0;
   int nr = 0;
-  for (int i = 0; i < x->d.op_count; i++)
-    if (x->d.operands[i].type == ARM64_OP_REG) {
-      int b = regbit(x->d.operands[i].reg);
+  for (int i = 0; i < detail(x)->op_count; i++)
+    if (detail(x)->operands[i].type == ARM64_OP_REG) {
+      int b = regbit(detail(x)->operands[i].reg);
       Mask bit = b < 0 ? 0 : BIT(b);
       ops |= bit;
       if (!nr++)
@@ -3671,23 +3786,23 @@ static int rmw(A a, Node* n) {
   if (!in(l[0].m, "ldxr|ldaxr") || !in(l[1].m, "add|sub") || !in(l[2].m, "stxr|stlxr") ||
       !eq(l[3].m, "cbnz"))
     return 0;
-  if (l[1].d.op_count != 3 || l[1].d.operands[2].type != ARM64_OP_IMM || strstr(l[1].op, "lsl"))
+  if (detail(&l[1])->op_count != 3 || detail(&l[1])->operands[2].type != ARM64_OP_IMM || strstr(operand_text(&l[1]), "lsl"))
     return 0;
-  arm64_op_mem b = l[0].d.operands[1].mem, b2 = l[2].d.operands[2].mem;
+  arm64_op_mem b = detail(&l[0])->operands[1].mem, b2 = detail(&l[2])->operands[2].mem;
   if (b.disp || b.index || b.base != b2.base || b2.disp)
     return 0;
-  if (l[1].d.operands[1].reg != l[0].d.operands[0].reg ||
-      l[2].d.operands[1].reg != l[1].d.operands[0].reg ||
-      l[3].d.operands[0].reg != l[2].d.operands[0].reg || target(l + 3) != a)
+  if (detail(&l[1])->operands[1].reg != detail(&l[0])->operands[0].reg ||
+      detail(&l[2])->operands[1].reg != detail(&l[1])->operands[0].reg ||
+      detail(&l[3])->operands[0].reg != detail(&l[2])->operands[0].reg || target(l + 3) != a)
     return 0;
   n->base = regbit(b.base);
   if (n->base < 0 || n->base >= 32)
     return 0;
-  n->k = l[1].d.operands[2].imm * (eq(l[1].m, "add") ? 1 : -1);
+  n->k = detail(&l[1])->operands[2].imm * (eq(l[1].m, "add") ? 1 : -1);
   n->uses = BIT(n->base);
   n->defs = 0;
   for (int i = 0; i < 3; i++) {
-    int b = regbit(l[i].d.operands[0].reg);
+    int b = regbit(detail(&l[i])->operands[0].reg);
     if (b >= 0)
       n->defs |= BIT(b);
   }
@@ -3952,7 +4067,7 @@ static void spin_emit(SpinRegion* r) {
       emit(0);
     } else if (x->kind == 3) {
       int d = rno(x->ins, 0);
-      A t = x->ins[0].d.operands[1].imm;
+      A t = detail(&x->ins[0])->operands[1].imm;
       emit(adrp(d, here(), t));
       if (eq(x->ins[0].m, "adr"))
         emit(ADDI(d, d, t & 4095, 0));

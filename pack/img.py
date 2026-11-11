@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""单一 IMG v1（v0.3.0）：一款游戏的原始资源交成一个文件——出包产出它、游戏库存它、推送 / 导出传它、iPhone 上放它。
+只装游戏原始资源（RomFS、exefs、ctl、系统数据…），字节永远不变；直连着色器库（派生产物）与界面覆盖层不进，放在 IMG 旁边。
+
+布局（小端，PAGE = 16 KB）：
+  [0, PAGE)        头：0 "S2AIMG01" | 8 u32 格式号 | 12 u32 0 | 16 16 字节游戏号（ASCII 十六进制）| 32 64 字节资源包号（ASCII，可空）
+                       | 96 u64 RomFS 段偏移 | 104 u64 RomFS 段长 | 112 u64 目录表偏移 | 120 u64 目录表长 | 128 u64 整个文件长 | 其余 0
+  RomFS 段         Switch 标准 RomFS（services/romfs_index --std，LibHac RomFsBuilder；与 hactool / nxdumptool 的 romfs.bin 同一种），起点页对齐
+  其余文件段       每个文件起点页对齐（读时一次 pread / mmap 零拷贝）
+  目录表           u32 槽数（2 的幂）| u32 条目数 | 槽数 × {u64 路径 FNV-1a 64（0 = 空槽）, u64 偏移, u64 长度, u32 路径偏移, u32 路径长} | 路径区（UTF-8）
+                   开放寻址线性探测，按路径 O(1) 查；路径用 / 分隔、相对资源包根（如 exefs/main.npdm）
+                   有 RomFS 段时目录表另有一条 romfs.list：RomFS 里全部文件的相对路径（UTF-8，按字节序，一行一个）——服务层叠界面覆盖层时
+                   按它重建虚拟 RomFS（services RomFsIndex.OpenImg），不依赖 LibHac 的目录遍历
+格式号只在字节布局真变时加一；新壳必须保留读旧号的代码（坑记录与发版步骤）。
+
+用法：img.py build <RomFS 目录> <其余文件清单 tsv：相对路径\\t源文件> <输出 .img> --gid <游戏号> [--pack-id <资源包号>] [--romfs-index <romfs_index 命令>]
+      img.py convert <产物根> <资源包目录> [--gid <游戏号>]   出包交付：资源包目录就地转 IMG 形态
+      img.py ls <img>   列目录表（单测 / 诊断）"""
+import argparse, os, shlex, struct, subprocess, sys
+# RomFS 目录遍历一律经 graphics/nvn/tools/romfs_list.py（tools/romfs_walk_lint.py 守卫）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graphics', 'nvn', 'tools'))
+import romfs_list  # noqa: E402
+
+MAGIC, FORMAT, PAGE = b'S2AIMG01', 1, 16384
+HDR = struct.Struct('<8sII16s64s5Q')
+SLOT = struct.Struct('<QQQII')
+
+
+class Red(Exception):
+    pass
+
+
+def fnv(path):
+    h = 1469598103934665603
+    for b in path.encode('utf-8'):
+        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return h or 1
+
+
+def up(n):
+    return (n + PAGE - 1) // PAGE * PAGE
+
+
+def toc_bytes(entries):
+    """entries：[(路径, 偏移, 长度)] → 目录表字节"""
+    slots = 1
+    while slots < max(1, len(entries)) * 2: slots <<= 1
+    table = [None] * slots; paths = bytearray()
+    for path, off, size in entries:
+        h = fnv(path); k = h & (slots - 1)
+        while table[k] is not None:
+            if table[k][0] == h and table[k][5] == path: raise Red(f'目录表路径重复：{path}')
+            k = (k + 1) & (slots - 1)
+        p = path.encode('utf-8'); table[k] = (h, off, size, len(paths), len(p), path); paths += p
+    out = bytearray(struct.pack('<II', slots, len(entries)))
+    for t in table: out += SLOT.pack(*t[:5]) if t else bytes(SLOT.size)
+    return bytes(out + paths)
+
+
+def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print):
+    """romfs_dir：RomFS 目录（None = 没有 RomFS）；others：[(相对路径, 源文件)]；→ 输出路径"""
+    if len(gid) != 16 or any(c not in '0123456789ABCDEFabcdef' for c in gid): raise Red(f'游戏号不对：{gid!r}')
+    part = out + '.part'
+    try:
+        with open(part, 'wb') as f: f.truncate(PAGE)
+        romfs_off = romfs_len = 0
+        if romfs_dir:
+            if not romfs_index: raise Red('写 RomFS 段要 romfs_index 命令（services/romfs_index）')
+            romfs_off = PAGE
+            r = subprocess.run([*shlex.split(romfs_index), '--std', romfs_dir, '-', part, str(romfs_off)], capture_output=True, text=True)
+            if r.returncode: raise Red(f'写标准 RomFS 段失败：{(r.stderr or r.stdout).strip()[-300:]}')
+            romfs_len = int(r.stdout.strip().splitlines()[-1])
+        pos = up(romfs_off + romfs_len) if romfs_dir else PAGE
+        entries = []
+        if romfs_dir:   # romfs.list：同 romfs_index 的文件集合（跳过 macOS 垃圾 .DS_Store / ._*，同 RomFsIndex.IsHostJunk），按字节序
+            names = sorted((os.path.relpath(os.path.join(d, n), romfs_dir).replace(os.sep, '/') for d, _, ns in romfs_list.walk(romfs_dir) for n in ns
+                            if n != '.DS_Store' and not n.startswith('._')), key=lambda x: x.encode('utf-8'))
+            lst = out + '.romfs.list'; open(lst, 'w', encoding='utf-8', newline='\n').write(''.join(n + '\n' for n in names)); others = [*others, ('romfs.list', lst)]
+        with open(part, 'r+b') as f:
+            for rel, src in sorted(others):
+                size = os.path.getsize(src); f.seek(pos)
+                with open(src, 'rb') as s:
+                    while b := s.read(1 << 22): f.write(b)
+                entries.append((rel, pos, size)); pos = up(pos + size)
+            toc = toc_bytes(entries); toc_off = pos; f.seek(toc_off); f.write(toc)
+            total = toc_off + len(toc)
+            f.seek(0); f.write(HDR.pack(MAGIC, FORMAT, 0, gid.upper().encode('ascii'), pack_id.encode('ascii')[:64], romfs_off, romfs_len, toc_off, len(toc), total))
+        os.replace(part, out)
+        if romfs_dir: os.unlink(out + '.romfs.list')
+    except BaseException:
+        try: os.unlink(part)
+        except OSError: pass
+        raise
+    say(f'IMG v1：{out}（{total / 1e9:.2f} GB；RomFS {romfs_len / 1e9:.2f} GB，其余 {len(entries)} 个文件）')
+    return out
+
+
+SKIP = ('romfs/', 'romfs.', 'romfs_overlay/', 'shaders/')   # 资源包里不进 IMG 的：RomFS（另建标准段）、旧镜像件、界面覆盖层、直连库（派生产物）
+
+
+KEEP = ('romfs_overlay/', 'shaders/')   # 转 IMG 后照旧按文件留在资源包里的（App 管的缓存，可更新；IMG 不动）
+
+
+def pack_rows(pack_dir):
+    """资源包 index.tsv 的行 → [(路径, 整行)]（跳过空行与清单自身）"""
+    out = []
+    for line in open(os.path.join(pack_dir, 'index.tsv'), encoding='utf-8'):
+        rel = line.split('\t', 1)[0]
+        if rel and rel not in ('index.tsv', 'manifest.json'): out.append((rel, line if line.endswith('\n') else line + '\n'))
+    return out
+
+
+def image_id(pack_dir):
+    """IMG 的资源包号：清单里进 IMG 那部分行（除着色器库 / 覆盖层之外，各行带每个文件的 SHA-256）的 SHA-256。
+    只随游戏原始资源变：着色器库重编、覆盖层更新都不改它，IMG 字节不变、启动器续传认得出是同一份"""
+    import hashlib
+    return hashlib.sha256(''.join(l for r, l in pack_rows(pack_dir) if not r.startswith(KEEP)).encode('utf-8')).hexdigest()
+
+
+def default_romfs_index():
+    """发版应用：预编工具（S2A_PREBUILT_TOOLS/romfs/romfs_index.dll，Windows 没有 bash）；开发树：services/romfs_index.sh 现编"""
+    pre = os.environ.get('S2A_PREBUILT_TOOLS')
+    if pre and os.path.isfile(os.path.join(pre, 'romfs', 'romfs_index.dll')):
+        import shutil
+        dn = os.environ.get('DOTNET') or shutil.which('dotnet') or 'dotnet'
+        return f'{shlex.quote(dn)} {shlex.quote(os.path.join(pre, "romfs", "romfs_index.dll"))}'
+    return f'bash {shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services", "romfs_index.sh"))}'
+
+
+def write(root, pack_dir, out_path, progress=None, romfs_index=None, gid=None):
+    """产物根 root 的完整原始 romfs/ 建标准 RomFS 段（库里的 romfs.files 缺被覆盖层替换的原文件，不能用它建），
+    资源包 pack_dir 清单（index.tsv）里的其余原始资源进其余文件段；游戏号 gid（没给取 root/unpack.tsv），资源包号 = image_id。
+    多程序合集（programs/）这一版不出 IMG（报红，调用方照旧出旧形态）。原子写（先 .part 再改名）"""
+    say = progress or (lambda *_: None)
+    gid = gid or next((l.rstrip('\n').split('\t', 1)[1] for l in open(os.path.join(root, 'unpack.tsv'), encoding='utf-8') if l.startswith('title_id\t')), '')
+    others = []
+    for rel, _ in pack_rows(pack_dir):
+        if rel.startswith(SKIP): continue
+        if rel.startswith('programs/'): raise Red('多程序合集（programs/）这一版不出 IMG')
+        src = os.path.join(pack_dir, rel)
+        if not os.path.isfile(src): raise Red(f'资源包清单里的 {rel} 不在 {pack_dir}')
+        others.append((rel, src))
+    romfs = os.path.join(root, 'romfs')
+    return build(romfs if os.path.isdir(romfs) else None, others, out_path, gid, image_id(pack_dir), romfs_index or default_romfs_index(), say=say)
+
+
+def convert(root, pack_dir, progress=None, romfs_index=None, gid=None):
+    """出包交付（pack/jobs/ipa.py deliver）：资源包目录就地转成 IMG 形态——game.img（游戏原始资源）+ 照旧按文件的着色器库 / 覆盖层 +
+    新 index.tsv（game.img 一行，第三列 = 资源包号；其余行原样）+ manifest.json v3（format img、imgFile、index_sha256 = 新 index.tsv 的 SHA-256）。
+    进了 IMG 的旧形态文件删掉。多程序合集 → 返回 None、目录不动（照旧旧形态）。→ game.img 路径"""
+    import hashlib, json
+    rows = pack_rows(pack_dir)
+    if any(r.startswith('programs/') for r, _ in rows): return None
+    out = os.path.join(pack_dir, 'game.img')
+    write(root, pack_dir, out, progress, romfs_index, gid)
+    h = header(out)
+    ix = f"game.img\t{h['total']}\t{h['pack_id']}\n" + ''.join(l for r, l in rows if r.startswith(KEEP))
+    for rel, _ in rows:
+        if not rel.startswith(KEEP):
+            try: os.unlink(os.path.join(pack_dir, rel))
+            except FileNotFoundError: pass
+    for d, subs, files in os.walk(pack_dir, topdown=False):   # 删空了的目录
+        if d != pack_dir and not os.listdir(d): os.rmdir(d)
+    def put(name, text):
+        tmp = os.path.join(pack_dir, name + '.tmp')
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as f: f.write(text)
+        os.replace(tmp, os.path.join(pack_dir, name))
+    put('index.tsv', ix)
+    total = sum(int(l.split('\t')[1]) for l in ix.splitlines())
+    put('manifest.json', json.dumps({'version': 3, 'format': 'img', 'imgFile': 'game.img', 'files': len(ix.splitlines()), 'total': total,
+                                     'index_sha256': hashlib.sha256(ix.encode('utf-8')).hexdigest()}, indent=1) + '\n')
+    return out
+
+
+def is_img(path):
+    try:
+        with open(path, 'rb') as f: return f.read(8) == MAGIC
+    except OSError:
+        return False
+
+
+def header(path):
+    with open(path, 'rb') as f: b = f.read(HDR.size)
+    m, fmt, _, gid, pid, ro, rl, to, tl, total = HDR.unpack(b)
+    if m != MAGIC: raise Red('不是 IMG')
+    return dict(format=fmt, gid=gid.decode('ascii'), pack_id=pid.rstrip(b'\0').decode('ascii'), romfs=(ro, rl), toc=(to, tl), total=total)
+
+
+def entries(path):
+    h = header(path)
+    with open(path, 'rb') as f:
+        f.seek(h['toc'][0]); t = f.read(h['toc'][1])
+    slots, n = struct.unpack_from('<II', t, 0); base = 8 + slots * SLOT.size; out = []
+    for i in range(slots):
+        hh, off, size, po, pl = SLOT.unpack_from(t, 8 + i * SLOT.size)
+        if hh: out.append((t[base + po: base + po + pl].decode('utf-8'), off, size))
+    return sorted(out)
+
+
+def find(path, rel):
+    """按路径 O(1) 查目录表 → (偏移, 长度) 或 None（与运行时读法同一算法）"""
+    h = header(path)
+    with open(path, 'rb') as f:
+        f.seek(h['toc'][0]); t = f.read(h['toc'][1])
+    slots, _ = struct.unpack_from('<II', t, 0); base = 8 + slots * SLOT.size; want = fnv(rel); k = want & (slots - 1)
+    while True:
+        hh, off, size, po, pl = SLOT.unpack_from(t, 8 + k * SLOT.size)
+        if not hh: return None
+        if hh == want and t[base + po: base + po + pl].decode('utf-8') == rel: return off, size
+        k = (k + 1) & (slots - 1)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest='cmd', required=True)
+    b = sp.add_parser('build'); b.add_argument('romfs'); b.add_argument('others'); b.add_argument('out'); b.add_argument('--gid', required=True)
+    b.add_argument('--pack-id', default=''); b.add_argument('--romfs-index')
+    v = sp.add_parser('convert', help='资源包目录就地转 IMG 形态（出包交付）'); v.add_argument('root'); v.add_argument('pack_dir'); v.add_argument('--gid')
+    l = sp.add_parser('ls'); l.add_argument('img')
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == 'build':
+            others = [tuple(l.rstrip('\n').split('\t', 1)) for l in open(a.others, encoding='utf-8') if '\t' in l]
+            build(None if a.romfs == '-' else a.romfs, others, a.out, a.gid, a.pack_id, a.romfs_index)
+        elif a.cmd == 'convert':
+            print(convert(a.root, a.pack_dir, gid=a.gid) or '多程序合集：照旧旧形态')
+        else:
+            print(header(a.img))
+            for e in entries(a.img): print(*e, sep='\t')
+    except (Red, OSError) as e:
+        print(f'【红】{e}'); return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

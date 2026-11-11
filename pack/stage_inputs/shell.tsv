@@ -193,3 +193,31 @@
 外	.gitignore	出壳过程里 git 命令读的忽略规则，不影响壳内容
 外	nuget.config	根目录的 NuGet 源配置，包版本由各工程钉死，不影响壳内容
 外	tools/gmake.sh	出壳挑 GNU Make 4 的路径（开发机工具），不影响壳内容
+
+# 「不」= 不编进壳（pack/shell/closure.py csiblings 用：表里逐文件登记的目录下，C 系文件要么入 / 外、要么在这里写明不编进壳）。
+#   出壳闭包与壳编号都不认这一类；下面 25 个是 11-10 首次核对时的现状，v0.2.3 出壳闭包核过、出壳没读到它们。
+不	android/tools/direct_identity_host.c
+不	graphics/dsx/win_posix.h
+不	graphics/metal/tools/xc_bench.m
+不	graphics/third_party/spirv_cross/main.cpp
+不	graphics/third_party/spirv_cross/spirv_cpp.cpp
+不	graphics/third_party/spirv_cross/spirv_cpp.hpp
+不	graphics/third_party/spirv_cross/spirv_cross_util.cpp
+不	graphics/third_party/spirv_cross/spirv_cross_util.hpp
+不	graphics/third_party/spirv_cross/spirv_hlsl.cpp
+不	graphics/third_party/spirv_cross/spirv_hlsl.hpp
+不	graphics/third_party/spirv_cross/spirv_reflect.cpp
+不	graphics/third_party/spirv_cross/spirv_reflect.hpp
+不	graphics/track/track_platform.h
+不	tests/det_host_queue.c
+不	tests/det_mring_wrap.c
+不	tests/fit_judge_test.c
+不	tests/loader_jumpslot.c
+不	tests/loader_order.c
+不	tests/loader_ro_lookup.c
+不	tests/rewrite_redzone_exec.c
+不	tests/rewrite_signed_jt_exec.c
+不	tests/rewriter_api_test.c
+不	tests/sync_contract_litmus.c
+不	tests/sync_publish_litmus.c
+不	tools/pipeline_timing.m

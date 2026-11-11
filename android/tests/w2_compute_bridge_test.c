@@ -160,12 +160,13 @@ int s2a_compile_worker_run(uint64_t session,uint64_t generation,const char *json
 static int finish(struct s2a_vk_device *d,void *owner,int completion) {
     (void)d;assert(owner==(void*)42&&completion==-1);finished++;return 0;
 }
-int nvn_vk_compute_pipeline_build(struct s2a_vk_device *device,const struct s2a_record_dispatch_state *s,
+int nvn_vk_compute_pipeline_build_prog(struct s2a_vk_device *device,const struct s2a_record_dispatch_state *s,
     const struct s2a_record_memory *memory,struct nvk_compute_tex_snapshot *snapshot,
     const struct s2a_source_entry_view *source,
-    const struct nvk_compute_lookup_result *p,
+    const struct nvk_compute_lookup_result *p,const uint8_t identity[32],
     struct s2a_record_dispatch_output *out,char *why,size_t cap) {
     (void)device;(void)s;(void)memory;pipeline++;assert(p->bytes&&p->length&&p->profile.storage_alignment==16);
+    assert(identity);   // miss 路径必须带 request.identity 供程序级入表（prog 门关时只是参数透传）
     // c1 常量段必须来自消费点 pin 住的源快照（不是按槽号回查）：这里断言同一次 prepare 的那份。
     src_seen = source != NULL;
     uint32_t entries,held,dropped;s2a_source_stats(&entries,&held,&dropped);assert(held>0);
@@ -174,6 +175,18 @@ int nvn_vk_compute_pipeline_build(struct s2a_vk_device *device,const struct s2a_
     captured_view = snapshot && snapshot->count ? snapshot->items[0].view : VK_NULL_HANDLE;
     if(mode==15){snprintf(why,cap,"profile=16 device=32");return -1;}
     out->pipeline=(VkPipeline)1;out->layout=(VkPipelineLayout)2;out->owner=(void*)42;out->finish=finish;return 0;
+}
+/* 程序级缓存缝：本测试不链 compute.c，桩成「永不命中」——命中路径由 pipeline 测试验收。 */
+struct cpso *nvn_vk_compute_prog_lookup(struct s2a_vk_device *d,const uint8_t identity[32]) {
+    (void)d;(void)identity;return NULL;
+}
+void nvn_vk_compute_prog_release(struct cpso *entry) { (void)entry; }
+int nvn_vk_compute_pipeline_build_cached(struct s2a_vk_device *d,const struct s2a_record_dispatch_state *s,
+    const struct s2a_record_memory *memory,struct nvk_compute_tex_snapshot *snapshot,
+    const struct s2a_source_entry_view *source,struct cpso *entry,
+    struct s2a_record_dispatch_output *out,char *why,size_t cap) {
+    (void)d;(void)s;(void)memory;(void)snapshot;(void)source;(void)entry;(void)out;
+    snprintf(why,cap,"cached stub never reached");return -1;
 }
 static void wr(uint8_t *p,unsigned v){p[0]=v;p[1]=v>>8;p[2]=v>>16;p[3]=v>>24;}
 // 诊断目录事实：后缀计数/取名/唯一请求集目录。门开时请求与结果各一件且同名配对；

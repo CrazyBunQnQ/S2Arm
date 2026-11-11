@@ -153,10 +153,25 @@ struct PrimaryPillStyle: ButtonStyle {
             .padding(.horizontal, 26).frame(minHeight: 50)
             .frame(maxWidth: expands ? .infinity : nil)
             .foregroundStyle(.black)
-            .background(ShellPalette.cream, in: Capsule())
+            .modifier(PrimarySurface())
             .opacity(configuration.isPressed ? 0.78 : 1)
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .contentShape(Capsule())
+    }
+}
+
+/// The primary action's surface: on iOS 26 / macOS 26 with Liquid Glass on, the system's regular glass
+/// tinted with the cream — the only tinted glass in the shell (GameCase #61's rule: tint for the one
+/// primary action); everywhere else the plain cream capsule it has always been.
+private struct PrimarySurface: ViewModifier {
+    // S2Arm：开关值用 @AppStorage 绑同一个键，设置里一切换就重画（原先在 body 里直接读 store，切了要等别的原因重画才变）
+    @AppStorage(ShellSettingsStore.liquidGlassKey, store: ShellSettingsStore.current.defaults) private var glass = true
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *), glass {
+            content.glassEffect(.regular.tint(ShellPalette.cream).interactive(), in: Capsule())
+        } else {
+            content.background(ShellPalette.cream, in: Capsule())
+        }
     }
 }
 
@@ -180,14 +195,29 @@ struct ChipButtonStyle: ButtonStyle {
         configuration.label.shellText(13, .semibold, relativeTo: .footnote)
             .padding(.horizontal, 14).frame(minHeight: 44)
             .foregroundStyle(.white)
-            // Its own quiet backdrop: a blur and a dark tint, so it stays legible on any art.
-            .background {
-                Capsule().fill(.ultraThinMaterial)
-                    .overlay(Capsule().fill(.black.opacity(configuration.isPressed ? 0.62 : 0.5)))
-            }
+            .modifier(ChipSurface(isPressed: configuration.isPressed))
             .environment(\.colorScheme, .dark)
             .overlay(Capsule().strokeBorder(.white.opacity(0.14)))
             .contentShape(Capsule())
+    }
+}
+
+/// The chip's own quiet backdrop: on iOS 26 / macOS 26 with Liquid Glass on, the system's regular glass
+/// (GameCase #61's shape; no tint — a chip is never the primary action), interactive because the chip is
+/// tappable — a plain `.regular` glass can latch its press state when the press restructures the view;
+/// everywhere else the blur and dark tint it has always worn, so it stays legible on any art.
+private struct ChipSurface: ViewModifier {
+    let isPressed: Bool
+    @AppStorage(ShellSettingsStore.liquidGlassKey, store: ShellSettingsStore.current.defaults) private var glass = true   // 同 PrimarySurface
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *), glass {
+            content.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            content.background {
+                Capsule().fill(.ultraThinMaterial)
+                    .overlay(Capsule().fill(.black.opacity(isPressed ? 0.62 : 0.5)))
+            }
+        }
     }
 }
 

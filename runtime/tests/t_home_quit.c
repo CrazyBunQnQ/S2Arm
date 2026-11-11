@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     check(strstr(t, "pad.buttonHome") != NULL, "front_mac.m 读手柄 Home");
     check(strstr(t, "s2a_hq_step(") != NULL, "front_mac.m 用 s2a_hq_step 决策");
     check(strstr(t, "case S2A_HQ_QUIT: [g_delegate shutdown]") != NULL, "A 退出走 shutdown（同 ⌘Q / 关窗）");
-    check(strstr(t, "if (g_hq.open) { publish(0, sticks); return; }") != NULL, "确认期间游戏不收手柄输入");
+    check(strstr(t, "if (g_hq.open) { publish_input(0, sticks); return; }") != NULL, "确认期间游戏不收手柄输入（旧 ABI 与 pad.c 两份状态都发 0）");
     if (failures) { fprintf(stderr, "t_home_quit：%d/%d 项不符\n", failures, checks); return 1; }
     printf("✓ t_home_quit：%d 项（按住 2 秒弹、松手重计、A 退出、B / Home / 30 秒取消、+ - 同按、接线）\n", checks);
     return 0;

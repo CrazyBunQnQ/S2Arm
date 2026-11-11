@@ -7,3 +7,12 @@ native-test-haptic_retry:
 	$(CC) $(CFLAGS) -Iios -o $(BUILD)/tests/t_haptic_retry runtime/tests/t_haptic_retry.c
 	$(BUILD)/tests/t_haptic_retry ios/controller.m
 TEST_TARGETS += native-test-haptic_retry
+
+# native-test-ea_rumble：GameSir G8+ MFi 有线马达的配件判定与组包（ios/ea_rumble.h 纯 C 部分，#462）
+NATIVE_TEST_OWN += ea_rumble
+.PHONY: native-test-ea_rumble
+native-test-ea_rumble:
+	@mkdir -p $(BUILD)/tests
+	$(CC) $(CFLAGS) -Iios -o $(BUILD)/tests/t_ea_rumble runtime/tests/t_ea_rumble.c
+	$(BUILD)/tests/t_ea_rumble
+TEST_TARGETS += native-test-ea_rumble

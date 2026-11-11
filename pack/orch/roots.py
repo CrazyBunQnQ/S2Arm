@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes as C
+from .shortroot import table_now, to_long
 from .winlong import long_path   # Win32 路径入口（CreateFileW / CopyFile2 / SetFileSecurityW / GetVolumePathNameW）不吃 Python 层的前缀补丁：>240 字符必须自己过 long_path
 from ctypes import wintypes as W
 import errno
@@ -108,6 +109,11 @@ def _junction(target, link):
 
 def directory_link(target, link, *, relative=None):
     target, link = Path(target), Path(link)
+    if os.name == 'nt':
+        # #461：Windows 上一律写绝对目标、且是玩家路径（短根联接换回长路径）。相对目标的目录软链经短根联接（%LOCALAPPDATA%\S2A\j\…）访问时，
+        #   有的 Windows（玩家实测 26320）stat / listdir / realpath 一律 WinError 3，同一链接走长路径或改写绝对目标都正常；没开开发者模式时走的
+        #   junction 退路本来就只能写绝对目标。写长路径不写短路径：短根入口任务结束就拆，链接不能指向它
+        target, relative = Path(to_long(str(target.absolute()), table_now())), None
     try:
         # Windows stores the substitute name verbatim; '/' in a relative
         # reparse target can be created successfully but fails kernel traversal.
@@ -118,6 +124,20 @@ def directory_link(target, link, *, relative=None):
             raise
         print(f'【黄】目录软链不可用，显式 junction 退路：{link.name}', file=sys.stderr)
         _junction(target, link)
+
+
+def link_target(path):
+    """目录链接 → 它指向的真实目录（strict）。Windows 上先读链接内容自己拼成绝对路径再解析，不让系统去解析相对目标：
+    #461 之前建的相对软链（v0.1.x / v0.2.x 开着开发者模式时）经短根联接访问会 WinError 3，读得出来才能克隆现行、换成绝对链接"""
+    path = Path(path)
+    if os.name != 'nt':
+        return path.resolve(strict=True)
+    raw = os.readlink(path)
+    for prefix in ('\\\\?\\', '\\??\\'):
+        if raw.startswith(prefix) and not raw.startswith('\\\\?\\UNC\\'):
+            raw = raw[len(prefix):]
+    target = Path(raw)
+    return (target if target.is_absolute() else path.parent / target).resolve(strict=True)
 
 
 def replace_link(source, dest):
@@ -385,14 +405,14 @@ class Roots:
         p = version / 'romfs'
         if not is_link(p):
             return None
-        target = p.resolve(strict=True)
+        target = link_target(p)
         store = self.path / '.romfs_store' / game
         if target.parent != store or not target.is_dir() or is_link(target) or target.name.startswith('.'):
             raise UnsafeRoot('RomFS 只能指向本款存储中的单个真实身份目录')
         for ancestor in (store, store.parent):
             if is_link(ancestor):
                 raise UnsafeRoot('RomFS 存储父目录不能是链接')
-        if p.is_symlink():
+        if p.is_symlink() and os.name != 'nt':   # Windows 写绝对目标（#461），上面已核它落在本款存储里
             expected = f'../.romfs_store/{game}/{target.name}'
             if os.readlink(p).replace('\\', '/') != expected:
                 raise UnsafeRoot('RomFS 必须使用约定相对链接')
@@ -442,7 +462,7 @@ class Roots:
             return None
         if not is_link(link):
             raise UnsafeRoot('现行必须是目录链接')
-        current = link.resolve(strict=True)
+        current = link_target(link)
         if current.parent != self.path or not current.name.startswith(game + '@') or is_link(current):
             raise UnsafeRoot('现行链接离开了本款版本目录')
         if pin:

@@ -667,10 +667,10 @@ namespace S2A.Services
             UserChannelPersistence channel = Channel;   // 进程级，跨重启存活（见 Channel）
 
             if (LdnServer == "lan") StartLanDiscovery();
-            // 游戏不支持系统语言时的退路：系统首选（带配置的会话用平台给的标签；显式 S2A_SYSTEM_LANGUAGE 时就是它）→ 简中 → 繁中 → 英语
-            string[] langTags = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_SYSTEM_LANGUAGE")) ? Array.Empty<string>()
-                : configuration?.SystemLanguageTag is Func<string> lt ? new[] { lt() } : configuration == null ? SystemLocale.Preferred() : Array.Empty<string>();
-            Ryujinx.HLE.S2AHooks.TitleLanguageFallback = SystemLocale.TitleFallback(langTags);
+            // 游戏不支持系统语言时的退路：只从宿主主语言出发（Host.Language：显式指定 → 平台标签 → 宿主首选第一项），见 SystemLocale.TitleFallback
+            Ryujinx.HLE.S2AHooks.TitleLanguageFallback = SystemLocale.TitleFallback(Language);
+            // 显式指定的系统语言（env.txt 也算）：游戏的控制数据没声明支持语言时仍按它回（IApplicationFunctions.GetDesiredLanguage）
+            Ryujinx.HLE.S2AHooks.ExplicitSystemLanguage = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_SYSTEM_LANGUAGE"));
             HleConfiguration config = new HleConfiguration(
                 MemoryConfiguration.MemoryConfiguration4GiB,
                 Language,                         // 缺省跟设备系统首选语言（SystemLocale.cs）；带存档 / 对真值时 S2A_SYSTEM_LANGUAGE 与存档语言一致（如01006F8002326000存档 Japanese）

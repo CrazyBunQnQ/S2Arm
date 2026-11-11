@@ -444,7 +444,18 @@ no controller-model override is applied.
   between face buttons.
 - **D-pad:** 8 sectors with a centre dead zone, so diagonals press two directions.
 - **Layout:** fills the area inside the system bars and cutouts in landscape; in
-  portrait it sits in a landscape-shaped box at the bottom.
+  portrait it sits in a landscape-shaped box at the bottom. Geometry is an F01
+  layout (`TouchLayout`, the iOS `ios/layouts/layout.schema.json` format)
+  projected into that box: the built-in one is `TouchLayout.androidDefault`, and
+  the four direction keys form one D-pad disc. Unlike iOS, Android sticks are
+  fixed at the centre of their activation region.
+- **Touch menu (no adb):** hold four fingers for 1.5 s. *Edit button positions*
+  dims the game and lets every key, the D-pad and both sticks be dragged; *Save*
+  writes the player's layout for this game to `files/touch-layouts/<title id>.json`
+  (the diagnostic app uses `app.json`), *Default* deletes it. *Touch passthrough*
+  sends touches that miss the controls to the game, and is remembered per game;
+  it is listed only in builds with `-Ps2arm.experimentalTouch=true` (the native
+  transport is off by default).
 
 The Activity merges the pad with a physical controller before publishing through
 `s2a_vpad_read`: buttons are OR'ed, and each stick comes from whichever is
@@ -453,6 +464,8 @@ connected. Focus loss, pause and device changes release it.
 
 Debug extras: `--es s2arm.touchpad on|off|auto`, and `--es s2arm.touchlog on`,
 which logs the layout and every change of the published input.
+`--ez s2arm.experimental_touch true|false` still switches passthrough for one run
+without changing the remembered choice.
 
 Checked on the Redmi K50 Ultra (landscape, 2026-10-22) with injected touches
 (`input motionevent`, sent only while this app was in front):

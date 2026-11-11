@@ -19,7 +19,9 @@ const char *s2a_gfx_mode_brief(void);   // 判定依据短写（开发浮层）
 int s2a_direct_packaged(void);
 // 直连模式已上屏的帧数（vi GetLatestFrameNumber 读）；通用模式恒 0
 unsigned long long s2a_direct_frame_count(void);
-// App 进 / 出后台（ios/app.m）：直连模式下暂停 / 恢复图形提交；通用模式空操作
+// App 进 / 出后台（ios/app.m）：直连模式下暂停 / 恢复图形提交；通用模式空操作。
+// gate 只关 / 开新入口，不等在途调用，供 UIKit 后台通知在返回前同步调用；suspend(1) 在工作队列上等旧调用并排空 GPU。
+void s2a_direct_suspend_gate(int on);
 void s2a_direct_suspend(int on);
 // 重启的新 provider 已就绪、guest 尚未启动：只关直连提交 gate 并确认没有在途调用，不排空或提交 Metal 命令。
 int s2a_direct_guest_start_hold(void);

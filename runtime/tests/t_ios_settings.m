@@ -421,6 +421,33 @@ int main(int argc, char **argv) {
         setenv("S2A_RES_SCALE", "9", 1); [a setObject:@"0.75" forKey:@"S2AResolutionScale"]; check(s2a_ios_res_scale(a) == 0.75f, @"渲染倍率：环境变量越界退回设置值 0.75");
         unsetenv("S2A_RES_SCALE"); [a setObject:@"7" forKey:@"S2AResolutionScale"]; check(s2a_ios_res_scale(a) == 1.0f, @"渲染倍率：都越界退回 1");
         [a removeObjectForKey:@"S2AResolutionScale"];
+
+        // 诊断局（#438）：开关开着 → 设定好的四个变量（帧号 3600 / 7200，读数写本款文档根 diagrun/），开关当场关掉，第二次起局不再开；
+        //   启动环境显式给的优先。期望值按规格手写
+        {   const char *dv[] = {"DM_NVN_PASSDUMP", "DM_NVN_TEXDUMP", "DM_NVN_TEXSNAP", "DM_NVN_SHOT"};
+            for (int i = 0; i < 4; i++) unsetenv(dv[i]);
+            NSString *docs = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+            NSString *dir = [docs stringByAppendingPathComponent:@"diagrun"];
+            [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+            [@"old" writeToFile:[dir stringByAppendingPathComponent:@"shot_1.png"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+            setenv("S2A_DOCS", docs.fileSystemRepresentation, 1);
+            s2a_ios_apply_diag_run(a);
+            check(getenv("DM_NVN_PASSDUMP") == NULL, @"诊断局：开关没开不设探针");
+            [a setBool:YES forKey:@"S2ADiagRunNext"]; setenv("DM_NVN_TEXSNAP", "5", 1);
+            s2a_ios_apply_diag_run(a);
+            NSString *want_td = [NSString stringWithFormat:@"3600,7200:%@/td_%%d.png", dir], *want_shot = [NSString stringWithFormat:@"3600,7200:%@/shot_%%d.png", dir];
+            check(getenv("DM_NVN_PASSDUMP") && !strcmp(getenv("DM_NVN_PASSDUMP"), "3600-3601"), @"诊断局：逐通道记录 3600-3601");
+            check(getenv("DM_NVN_TEXDUMP") && [@(getenv("DM_NVN_TEXDUMP")) isEqual:want_td], @"诊断局：颜色目标 3600,7200 写 diagrun/td_%d.png");
+            check(getenv("DM_NVN_SHOT") && [@(getenv("DM_NVN_SHOT")) isEqual:want_shot], @"诊断局：出图 3600,7200 写 diagrun/shot_%d.png");
+            check(getenv("DM_NVN_TEXSNAP") && !strcmp(getenv("DM_NVN_TEXSNAP"), "5"), @"诊断局：启动环境显式给的优先");
+            check(![a boolForKey:@"S2ADiagRunNext"], @"诊断局：开关用一次就关（只管这一局）");
+            check(![NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:@"shot_1.png"]] && [NSFileManager.defaultManager fileExistsAtPath:dir],
+                  @"诊断局：上一次的图清掉、diagrun 目录在");
+            for (int i = 0; i < 4; i++) unsetenv(dv[i]);
+            s2a_ios_apply_diag_run(a);
+            check(getenv("DM_NVN_PASSDUMP") == NULL, @"诊断局：第二次起局不再开");
+            unsetenv("S2A_DOCS"); [NSFileManager.defaultManager removeItemAtPath:docs error:nil];
+        }
         clear_environment();
         [a removePersistentDomainForName:suiteA];
         [b removePersistentDomainForName:suiteB];

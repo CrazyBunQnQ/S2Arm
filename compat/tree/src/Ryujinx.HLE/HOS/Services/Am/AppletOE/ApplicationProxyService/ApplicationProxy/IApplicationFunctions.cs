@@ -142,33 +142,81 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             // TODO: When above calls are implemented, switch to using ns:am
 
             long desiredLanguageCode = context.Device.System.State.DesiredLanguageCode;
-            int supportedLanguages = (int)context.Device.Processes.GetProcess(_pid).ApplicationControlProperties.SupportedLanguageFlag;
-            int firstSupported = BitOperations.TrailingZeroCount(supportedLanguages);
+            var process = context.Device.Processes.GetProcess(_pid);
+            int supportedLanguages = (int)process.ApplicationControlProperties.SupportedLanguageFlag;
 
-            if (firstSupported > (int)TitleLanguage.BrazilianPortuguese)
+            // S2Arm: Switch 2 游戏不知道支持哪些语言（导出目录一律没有控制分区，导入时合成；或支持位为 0）→ 直接回宿主主语言（玩家显式指定的优先），不写死英语。
+            //   0.2.3 起合成件只声明美式英语 / 位为 0 回美式英语（#401），所有 Switch 2 游戏在中文系统下都成了英文（#465，程序号 0400486024DEC000 原先跟系统语言显示）。
+            //   只对 Switch 2（程序号 04 开头）：Switch 1 的合成件（#401 NUP 没带控制分区）保持下面的英语退路，游戏不支持宿主语言时会黑屏
+            if (Switch2LanguagesUnknown(process.ProgramId, supportedLanguages, process.ApplicationControlProperties.DisplayVersionString.ToString()))
+            {
+                Logger.Info?.Print(LogClass.ServiceAm, $"[S2A 语言] 宿主主语言 {context.Device.System.State.DesiredTitleLanguage}，Switch 2 游戏支持表未知（控制数据是合成的或没声明，0x{supportedLanguages:X4}），按宿主主语言");
+                context.ResponseData.Write(desiredLanguageCode);
+
+                return ResultCode.Success;
+            }
+
+            if (NoKnownLanguages(supportedLanguages))
             {
                 // 支持语言位为 0（旧版导入合成的 control.nacp 没写这一项，#401）：原样回系统语言（如 zh-Hans）时游戏判为无效语言、去读不存在的语言资源，一直黑屏。
                 // 退到美式英语，与出包合成件的缺省（只声明美式英语）同一口径，已导入的旧库不用重新导入
-                Logger.Warning?.Print(LogClass.ServiceAm, "Application has zero supported languages, using AmericanEnglish");
+                // 玩家显式指定了系统语言（S2A_SYSTEM_LANGUAGE，S2AHooks.ExplicitSystemLanguage）时听玩家的：支持位为 0 只说明不知道游戏支持什么，
+                // 游戏本身支持该语言的（11-10 程序号 0400486024DEC000：此前系统日语下显示日语）不该被改成英语
+                bool chosen = S2AHooks.ExplicitSystemLanguage;
+                Logger.Warning?.Print(LogClass.ServiceAm, chosen ? "Application has zero supported languages, using the explicitly chosen system language" : "Application has zero supported languages, using AmericanEnglish");
 
-                context.ResponseData.Write(SystemStateMgr.GetLanguageCode((int)SystemLanguage.AmericanEnglish));
+                context.ResponseData.Write(ZeroSupportedLanguageCode(desiredLanguageCode, chosen));
 
                 return ResultCode.Success;
             }
 
             // If desired language is not supported by application, use first supported language from TitleLanguage.
             // TODO: In the future, a GUI could enable user-specified search priority
-            if (((1 << (int)context.Device.System.State.DesiredTitleLanguage) & supportedLanguages) == 0)
+            // S2Arm: 退路由宿主给（S2AHooks.TitleLanguageFallback = 主语言、同族变体、美式 / 英式英语、简 / 繁中，services SystemLocale.TitleFallback），都不中才取支持表第一项；
+            //   一行日志写清宿主主语言、支持表、最终选择和第几步（#445：原先只在退路时打「Using X」，看不出是哪一步选到的）
+            TitleLanguage hostLanguage = context.Device.System.State.DesiredTitleLanguage;
+            int picked = PickDesiredLanguage(hostLanguage, supportedLanguages, S2AHooks.TitleLanguageFallback);
+            if (picked != (int)hostLanguage)
             {
-                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), PickFallbackLanguage(supportedLanguages, S2AHooks.TitleLanguageFallback)));
+                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), picked));
                 desiredLanguageCode = SystemStateMgr.GetLanguageCode((int)newLanguage);
-
-                Logger.Info?.Print(LogClass.ServiceAm, $"Application doesn't support configured language. Using {newLanguage}");
             }
+
+            Logger.Info?.Print(LogClass.ServiceAm, $"[S2A 语言] 宿主主语言 {hostLanguage}，游戏支持表 0x{supportedLanguages:X4}，选 {(TitleLanguage)picked}（{LanguageStep(hostLanguage, picked, S2AHooks.TitleLanguageFallback)}）");
 
             context.ResponseData.Write(desiredLanguageCode);
 
             return ResultCode.Success;
+        }
+
+        // S2Arm: Switch 2 游戏（程序号 04 开头）且支持哪些语言未知：支持位（0..15）全为 0，或控制数据是导入时合成的（pack/ns2_dump.py synth_nacp 把显示版本写成 "?"，真游戏不会是这个值）
+        internal static bool Switch2LanguagesUnknown(ulong programId, int supportedLanguages, string displayVersion) =>
+            (programId >> 56) == 0x04 && (NoKnownLanguages(supportedLanguages) || displayVersion == "?");
+
+        // S2Arm: 支持位里一个已知语言（0 美式英语 … 15 巴西葡语、16 波兰语、17 泰语）都没有。原先用「最低位 > 巴西葡语」或低 16 位判，
+        //   只支持波兰语 / 泰语的款被当成没有语言（审计 P2-275）
+        private const int KnownLanguageMask = (1 << ((int)TitleLanguage.Thai + 1)) - 1;
+
+        internal static bool NoKnownLanguages(int supportedLanguages) => (supportedLanguages & KnownLanguageMask) == 0;
+
+        // S2Arm: 支持语言位为 0 时回给游戏的语言码：缺省美式英语（#401）；玩家显式指定了系统语言就回它
+        internal static long ZeroSupportedLanguageCode(long systemLanguageCode, bool explicitSystemLanguage) =>
+            explicitSystemLanguage ? systemLanguageCode : SystemStateMgr.GetLanguageCode((int)SystemLanguage.AmericanEnglish);
+
+        // S2Arm: 主语言游戏支持就用它，否则按退路选（PickFallbackLanguage）
+        internal static int PickDesiredLanguage(TitleLanguage hostLanguage, int supportedLanguages, TitleLanguage[] fallback) =>
+            ((1 << (int)hostLanguage) & supportedLanguages) != 0 ? (int)hostLanguage : PickFallbackLanguage(supportedLanguages, fallback);
+
+        // S2Arm: 选到的语言走的是第几步（日志用）：① 主语言、② 同族变体、③ 英语、④ 中文、⑤ 支持表第一项
+        internal static string LanguageStep(TitleLanguage hostLanguage, int picked, TitleLanguage[] fallback)
+        {
+            if (picked == (int)hostLanguage) return "第 1 步：宿主主语言";
+            if (Array.IndexOf(fallback ?? Array.Empty<TitleLanguage>(), (TitleLanguage)picked) < 0) return "第 5 步：游戏支持表第一项";
+            bool english = picked == (int)TitleLanguage.AmericanEnglish || picked == (int)TitleLanguage.BritishEnglish;
+            bool hostEnglish = hostLanguage == TitleLanguage.AmericanEnglish || hostLanguage == TitleLanguage.BritishEnglish;
+            bool chinese = picked == (int)TitleLanguage.SimplifiedChinese || picked == (int)TitleLanguage.TraditionalChinese;
+            bool hostChinese = hostLanguage == TitleLanguage.SimplifiedChinese || hostLanguage == TitleLanguage.TraditionalChinese;
+            return english && !hostEnglish ? "第 3 步：英语" : chinese && !hostChinese ? "第 4 步：中文" : "第 2 步：同族变体";
         }
 
         // S2Arm: the first of the host's fallback languages the game supports, else the game's first supported language (upstream)

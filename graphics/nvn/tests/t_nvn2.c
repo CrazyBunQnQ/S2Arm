@@ -205,6 +205,18 @@ int main(void) {
             "_ZN2nn4chat61AttachToCameraImageProcessingModeForVirtualCameraChangedEventEPNS_2os11SystemEventE"
         };
         CHECK(sizeof chat_api / sizeof *chat_api == 65);
+        {   // #116 摄像头视频存储：没登记实现（本单测不链 nvn2_codec.c）时照「没在聊」回 0；登记后 chat_entry 交的就是登记的那四个
+            uint64_t (*sz0)(int, int, int) = (uint64_t (*)(int, int, int))s2a_nv_entry("_ZN2nn4chat35CalculateLocalCameraVideoBufferSizeEiii");
+            CHECK(sz0 && sz0(384, 216, 4) == 0);
+            void nvn2_chat_video_register(void *, void *, void *, void *);   // nvn2.c（声明不放 nvn2.h）
+            static int fake;
+            nvn2_chat_video_register(&fake, &fake + 1, &fake + 2, &fake + 3);
+            CHECK(s2a_nv_entry("_ZN2nn4chat36CalculateRemoteCameraVideoBufferSizeEiii") == (void *)&fake);
+            CHECK(s2a_nv_entry("_ZN2nn4chat33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm") == (void *)(&fake + 1));
+            CHECK(s2a_nv_entry("_ZN2nn4chat32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE") == (void *)(&fake + 2));
+            CHECK(s2a_nv_entry("_ZN2nn4chat25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi") == (void *)(&fake + 3));
+            nvn2_chat_video_register(NULL, NULL, NULL, NULL);
+        }
         for (unsigned i = 0; i < sizeof chat_api / sizeof *chat_api; i++) {
             void *f = s2a_nv_entry(chat_api[i]);
             int attach = strstr(chat_api[i], "AttachTo") != NULL;

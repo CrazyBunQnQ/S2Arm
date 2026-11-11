@@ -18,6 +18,7 @@ public final class ShellSettingsStore: @unchecked Sendable {
     /// Where the left stick sits, as the engine reads DM_TOUCH_STICK. The corner is the built-in place and is never stored.
     public static let touchStickPlaces = ["corner", "higher", "inward"]
     public static let touchLayoutKey = "touchLayout"             // the player's arrangement: DM_TOUCH_LAYOUT for every game
+    public static let liquidGlassKey = "liquidGlass"             // true/false; Liquid Glass on the floating surfaces, on unless turned off
 
     /// The store the app reads and writes. Tests and previews swap it.
     nonisolated(unsafe) public static var current = ShellSettingsStore()
@@ -77,6 +78,13 @@ public final class ShellSettingsStore: @unchecked Sendable {
         var layout = touchLayout
         layout.reset(kind)
         storeTouchLayout(layout)
+    }
+
+    /// Liquid Glass on the floating chips and the primary pill where the OS offers it (iOS 26 / macOS 26);
+    /// on unless the player turns it off, and never stored while on.
+    public var liquidGlass: Bool { defaults.object(forKey: Self.liquidGlassKey) as? Bool ?? true }
+    public func storeLiquidGlass(_ on: Bool) {
+        if on { defaults.removeObject(forKey: Self.liquidGlassKey) } else { defaults.set(false, forKey: Self.liquidGlassKey) }
     }
 
     public var padMap: PadMap { PadMap(defaults.dictionary(forKey: Self.padMapKey) as? [String: String] ?? [:]) }

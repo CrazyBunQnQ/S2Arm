@@ -19,6 +19,7 @@
 #      iOS 输出根 keys.tsv = 三键、ps_inputs.tsv 在；--export-mac 目录有三键 Mac 三样（考卷 / 全量对拍用）
 #   ⑩ 只出 Mac（--no-ios --publish mac）：退出 0；输出打出 lib.idx 与分片、没有按键文件；「只出 Mac：Mac 三样都齐」「发布 mac 库：反射全部 -sdk macosx」；Metal 汇总只有 mac
 #   ⑪ 两张表（c1_full.tsv / cb_extent.tsv，C1Cb 接入中）：配置档目录里两张表都在、首行「# chain b-<链号> inputs <摘要>」（内容逐字节由别的对拍保证）
+#   ⑫ 出包形态不导出（发布前放掉 Mac 侧源码、两张表后台遍每支一批）：容器 / keys / ps_inputs / 两张表与 ⑨ 逐字节相同
 #   未覆盖：片元 / 顶点才有的附加入口回退、_bf / _bv / _se 真出变体（夹具造不出能编过的片元 / 顶点码），只在真实样本上看
 import glob, json, os, re, shutil, struct, subprocess, sys, tempfile
 
@@ -62,13 +63,14 @@ def build_env():   # → (链号, 程序号, 摘要, profile-rows 文件)：dire
     if r.returncode or len(c) != 3: print(r.stdout + r.stderr); print('✗ t_dmsh_reuse：dmsh_chain.py --build-env 没给出「链号\\t程序号\\t摘要」'); sys.exit(1)
     return c[0], c[1], c[2], rows
 
-def build(name, cas, *flags, rows=None, progress=None):   # → (退出码, 输出, Mac 库目录, iOS 库目录, 链号, 摘要)
+def build(name, cas, *flags, rows=None, progress=None, env_add=None):   # → (退出码, 输出, Mac 库目录, iOS 库目录, 链号, 摘要)
     chain, game, inp, rows0 = build_env()
     a = [*CMD, 'build', '--pkg', PKG, '--profile', P, '--game', game, '--chain', chain, '--inputs', inp, '--profile-rows', rows or rows0,
          '--out', os.path.join(t, name, 'mac'), '--iosout', os.path.join(t, name, 'ios'), '--cas', os.path.join(t, cas), '--dsx', DSX, '--spvc', SPVC,
          '-j', '2', '--lock', os.path.join(TOOLS, 'dmsh_chain.lock'), *flags]
     env = dict(os.environ); env.pop('S2A_PROGRESS', None)
     if progress: env['S2A_PROGRESS'] = progress
+    env.update(env_add or {})
     r = subprocess.run(a, capture_output=True, text=True, env=env)
     if r.returncode: print(r.stdout[-1500:] + r.stderr[-1500:])
     return r.returncode, r.stdout + r.stderr, os.path.join(t, name, 'mac', 'b-' + chain), os.path.join(t, name, 'ios', 'b-' + chain), chain, inp
@@ -190,6 +192,15 @@ check(rc == 0 and 'lib.idx' in packs and len(packs) >= 2 and not perkey(macp) + 
       f'⑨ 发布 iOS：退出 {rc}，容器 {packs}，按键文件 {len(perkey(macp) + perkey(iosp))} 个（期望 0），iOS 库 {len(iosbytes)} 份字节原样在分片里')
 check(keys == ALL and os.path.exists(os.path.join(top, 'ps_inputs.tsv')) and all(names(exp, e) == ALL for e in ('metal', 'metallib', 'json')),
       f'⑨ keys.tsv 三键 {keys == ALL}、ps_inputs.tsv 在、--export-mac 目录 Mac 三样各 3 键')
+# ⑫ 出包形态不导出（v0.2.4 出包空间：两张表收尾挪到发布前、ps_inputs 写完即放掉 Mac 侧源码那份；两张表后台遍按字节切批，S2A_C1CB_CHUNK_MB=0 每支一批）：
+#   产物与 ⑨（导出、源码留到最后、缺省切批）逐字节相同——容器分片 + lib.idx、keys.tsv、ps_inputs.tsv、两张表（首行带印章时间，比第二行起）；日志有「临时数据：」用量行
+def body(d, n): b = open(os.path.join(d, n), 'rb').read(); return b.split(b'\n', 1)[1] if d == P else b
+def outs(lib, top_): return {n: body(d, n) for d, ns in ((lib, [n for n in ls(lib) if n.startswith('lib.')]), (top_, ['keys.tsv', 'ps_inputs.tsv']), (P, ['c1_full.tsv', 'cb_extent.tsv'])) for n in ns if os.path.exists(os.path.join(d, n))}
+ref = outs(iosp, top)
+rc, o, _, iosq, _, _ = build('q', 'cas_b', '--publish', 'ios', env_add={'S2A_C1CB_CHUNK_MB': '0'})
+got = outs(iosq, os.path.dirname(iosq))
+check(rc == 0 and len(ref) >= 6 and got == ref and '临时数据：' in o,
+      f'⑫ 发布 iOS 不导出、两张表每支一批：退出 {rc}，产物 {sorted(got)} 与 ⑨ 逐字节相同 {got == ref}（不同：{sorted(n for n in set(got) | set(ref) if got.get(n) != ref.get(n))}），用量行 {"临时数据：" in o}')
 # ⑩ 只出 Mac
 rc, o, macm, iosm, _, _ = build('m', 'cas_m', '--no-ios', '--publish', 'mac')
 mlibs = sorted(n for n in ls(iosm) if n.startswith('lib.'))

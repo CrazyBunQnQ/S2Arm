@@ -18,6 +18,10 @@ namespace Ryujinx.HLE
         // (the host passes the system's preferred languages, then Simplified / Traditional Chinese, then English). Null = upstream.
         public static Ryujinx.HLE.HOS.SystemState.TitleLanguage[] TitleLanguageFallback;
 
+        // The system language was chosen explicitly (S2A_SYSTEM_LANGUAGE) rather than taken from the device: GetDesiredLanguage returns it
+        // even when the game's control data declares no supported languages (otherwise American English, #401).
+        public static bool ExplicitSystemLanguage;
+
         // KReadableEvent bound to a native event (KReadableEvent.S2ANativeEvent != 0): mirror Signal / Clear to it,
         // because the game waits on the native event (WaitSynchronization never enters C#).
         public static delegate*<ulong, void> EventSignal;

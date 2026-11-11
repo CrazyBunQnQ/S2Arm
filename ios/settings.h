@@ -2,6 +2,11 @@
 
 // 在模块装载和 C# 初始化前读取当前 App 的画面偏好。
 void s2a_ios_load_graphics_settings(void);
+// 诊断局（#438）：设置里 S2ADiagRunNext 开着 → 设逐通道读数的环境变量（读数写 <本款文档根>/diagrun/），并把开关关掉（只管这一局）
+#ifdef __OBJC__   // 本头也被纯 C 的 runtime/src/host_main.c 引用；NSUserDefaults 只有 Objective-C 看得到
+@class NSUserDefaults;
+void s2a_ios_apply_diag_run(NSUserDefaults *defaults);
+#endif
 // 包内能力清单 s2a_caps.tsv 里某项能力（fps60 / widen）的值：1 / 0；没有清单或没有这行 = -1（设置页据此如实显示开关、起局据此认 60 帧手动开）
 int s2a_ios_caps_value(const char *cap);
 // 串行会话启动阶段使用：旧客体停止后，撤销本模块注入的值并读取新偏好。

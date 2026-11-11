@@ -1,0 +1,182 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs b/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs
+index 4d508e5d5b0f41c50205ca9e4ebf91bdf05431df..00afdc75d6ca734bed36be395d76c75536f044c7 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs
+@@ -8,7 +8,9 @@ namespace Ryujinx.Graphics.Nvdec
+     // spec defaults (key frame resets all contexts; refresh_frame_context=0 means *fc is only ever a copy and
+     // frame_contexts[0] never drifts), so every diff update here is spec-default -> the job's supplied table.
+     //
+-    // Emission order is exactly the decoder's read order (libvpx read_compressed_header, BSD reference):
++    // Emission order is exactly the decoder's read order — 出处：libvpx 1.17.0 (pinned, BSD-3-Clause)
++    // vp9/decoder/vp9_decodeframe.c `read_compressed_header`、vp9/common/vp9_entropymode.h 默认表；
++    // C 镜像 android/codecs/vpxbench/hdr.c 同款，hdrcmp 金样测字节级一致：
+     //   tx_mode | tx probs (TX_MODE_SELECT) | coef probs | skip |
+     //   [inter only] inter_mode | interp probs (SWITCHABLE) | intra_inter | reference_mode | ref probs |
+     //   y_mode | partition | mv probs
+@@ -211,6 +213,10 @@ namespace Ryujinx.Graphics.Nvdec
+         // express odd targets; a reference mode above SINGLE is only writable when compound is allowed.
+         public static string Check(in Vp9NativeInput p, ReadOnlySpan<byte> probs, ReadOnlySpan<byte> defaults)
+         {
++            // The repack always emits error_resilient_mode=0; an error-resilient job would derive
++            // use_prev_frame_mvs differently on the hardware side than in the original stream. Scoped here:
++            // the libvpx backend has no compressed header to corrupt, so the flag must not gate it.
++            if (p.ErrorResilient) return "error_resilient";
+             if (probs.Length < ProbsSize || defaults.Length < ProbsSize) return "probs blob";
+ 
+             bool intraOnly = !p.KeyFrame && p.IntraOnly;
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+index 8bd7c3424e87ef74bd2fe3c80f436e0cf3c7251e..971d8db0eb42999087dc92ded24ac6fa3163b969 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+@@ -169,9 +169,6 @@ namespace Ryujinx.Graphics.Nvdec
+         public static string Check(in Vp9NativeInput p)
+         {
+             if (p.SegmentationEnabled) return "segmentation";
+-            // The repack always emits error_resilient_mode=0; an error-resilient job would derive
+-            // use_prev_frame_mvs differently on the hardware side than in the original stream.
+-            if (p.ErrorResilient) return "error_resilient";
+             if (p.BitDepth != 0 && p.BitDepth != 8) return "bit depth";
+             if (p.Width < 1 || p.Height < 1 || p.Width > 8192 || p.Height > 8192) return "frame size";
+             if (p.TxMode is < 0 or > 4) return "tx_mode";
+@@ -189,6 +186,9 @@ namespace Ryujinx.Graphics.Nvdec
+             return null;
+         }
+ 
++        // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR}: the bitstream literal is a table index,
++        // not the enum value (read_interp_filter maps it back). Only the compressed-header (hardware) path
++        // needs the remap — the libvpx path must keep the bytes it always emitted.
+         private static readonly byte[] InterpLiteral = { 1, 0, 2, 3 };
+ 
+         public static void TileRange(int width, out int minLog2, out int maxLog2)
+@@ -236,12 +236,10 @@ namespace Ryujinx.Graphics.Nvdec
+         // Writes header + 1 stand-in byte + tiles into dst; returns the length. target: -1 on key frames.
+         public static int Write(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, ReadOnlySpan<byte> tiles, Span<byte> dst)
+         {
+-            int n = WriteUncompressed(in p, refIdx, target, 1, dst);
++            int n = WriteUncompressed(in p, refIdx, target, 1, false, dst);
+             dst[n++] = 0;                      // stand-in compressed header
+             tiles.CopyTo(dst[n..]);
+             n += tiles.Length;
+-            if ((dst[n - 1] & 0xe0) == 0xc0)
+-                dst[n++] = 0;                  // a packet ending in a marker byte would be split as a superframe
+             return n;
+         }
+ 
+@@ -254,7 +252,7 @@ namespace Ryujinx.Graphics.Nvdec
+             Span<byte> compressed = stackalloc byte[Vp9CompressedHeader.MaxBytes];
+             int nCompressed = Vp9CompressedHeader.Write(in p, probs, defaults, compressed);
+ 
+-            int n = WriteUncompressed(in p, refIdx, target, nCompressed, dst);
++            int n = WriteUncompressed(in p, refIdx, target, nCompressed, true, dst);
+             compressed[..nCompressed].CopyTo(dst[n..]);
+             tiles.CopyTo(dst[(n + nCompressed)..]);
+             n += nCompressed + tiles.Length;
+@@ -263,7 +261,10 @@ namespace Ryujinx.Graphics.Nvdec
+             return n;
+         }
+ 
+-        private static int WriteUncompressed(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, int headerSize, Span<byte> dst)
++        // mc: emit the byte-level fixups a real decoder requires (interp literal remap, tail-bit mask,
++        // marker-pattern pad byte). The libvpx backend consumed the pre-fixup byte shape since this file
++        // existed — its Write must keep producing those exact bytes (mc=false).
++        private static int WriteUncompressed(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, int headerSize, bool mc, Span<byte> dst)
+         {
+             bool key = p.KeyFrame;
+             bool intraOnly = !key && p.IntraOnly;
+@@ -307,9 +308,7 @@ namespace Ryujinx.Graphics.Nvdec
+                     b.Put(0, 1);
+                     b.Put(p.AllowHighPrecisionMv ? 1u : 0u, 1);
+                     b.Put(p.InterpFilter == 4 ? 1u : 0u, 1);
+-                    // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR} — the literal is a table
+-                    // index, not the enum value (read_interp_filter maps it back)
+-                    if (p.InterpFilter != 4) b.Put((uint)InterpLiteral[p.InterpFilter], 2);
++                    if (p.InterpFilter != 4) b.Put((uint)(mc ? InterpLiteral[p.InterpFilter] : p.InterpFilter), 2);
+                 }
+             }
+ 
+@@ -352,7 +351,7 @@ namespace Ryujinx.Graphics.Nvdec
+             b.Put((uint)headerSize, 16);       // header_size_in_bytes
+ 
+             int n = (b.Bit + 7) >> 3;
+-            if ((b.Bit & 7) != 0) dst[n - 1] &= (byte)(0xff << (8 - (b.Bit & 7)));
++            if (mc && (b.Bit & 7) != 0) dst[n - 1] &= (byte)(0xff << (8 - (b.Bit & 7)));
+             return n;
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+index 0f859b7d4a1310518b67d9cc64251693377b9f7e..71afdf023f9d683a69cc17ddf43f63871876dd93 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Nvdec
+     sealed class Vp9NativePath : IDisposable
+     {
+         private const int MaxErrors = 3;
++        private const int MaxMidFallbacks = 3;   // mid-stream fallbacks tolerated per decode context; then native is disabled outright
+ 
+         // Guest MV freshness: a backend that cannot produce the NVDEC MV field (ProducesGuestMetadata=false)
+         // leaves the guest MV write buffer untouched on Decoded, so the read buffer a later managed job would
+@@ -43,6 +44,7 @@ namespace Ryujinx.Graphics.Nvdec
+         private Vp9GuestMvState _mvState;
+         private bool _active;
+         private int _errors;
++        private int _midFallbacks;
+         private bool _loggedFirst;
+ 
+         public bool Disabled { get; private set; }
+@@ -78,7 +80,26 @@ namespace Ryujinx.Graphics.Nvdec
+ 
+         private void Fallback(string reason)
+         {
++            // A fallback while a native segment was running strands the guest MV/count state the managed
++            // decoder would consume, freezing output until the next key frame. A stream that keeps hitting
++            // this gets its native backend disabled for the rest of the context — every later GOP then runs
++            // managed from the start instead of freezing its first frames over and over.
++            bool midStream = _active;
++
+             Deactivate();
++            _backend.NoteFallback(reason);
++
++            if (midStream)
++            {
++                _midFallbacks++;
++                Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码中途回退 {_midFallbacks}/{MaxMidFallbacks}：{reason}");
++
++                if (_midFallbacks >= MaxMidFallbacks)
++                {
++                    Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码同一上下文累计 {MaxMidFallbacks} 次中途回退，本解码上下文停用原生后端，之后各 GOP 从头走托管解码器");
++                    Disabled = true;
++                }
++            }
+ 
+             if (_loggedReasons.Add(reason))
+             {
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs
+index 8d225e3d9dda872d64c98ddb1e1469a2aefddf8e..f2025baa46d6dddb815b8b37955eb64c158bbb81 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs
+@@ -46,6 +46,9 @@ namespace Ryujinx.Graphics.Nvdec.Vpx
+         // The hook injects tx_mode/reference_mode/probs out of band; the repack's stand-in byte is enough.
+         public bool NeedsCompressedHeader => false;
+ 
++        // No outcome ledger on this backend — fallbacks are the caller's bookkeeping.
++        public void NoteFallback(string reason) { }
++
+         public Vp9NativeResult Decode(
+             ReadOnlySpan<byte> frame,
+             ReadOnlySpan<byte> probs,
+diff --git a/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs b/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs
+index 4f69c86219d257c13e222d1afb299d0da9d48178..f0017282bf9fa7b098339c1af2807493173ad796 100644
+--- a/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs
++++ b/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs
+@@ -63,6 +63,11 @@ namespace Ryujinx.Graphics.Video
+         // update slots (uv_mode for shown frames; y_mode/partition for intra-only) must sit at ctx defaults.
+         bool NeedsCompressedHeader { get; }
+ 
++        // Called once per job the caller gives back to the managed decoder mid-stream, with the reason.
++        // Backends that keep an outcome ledger print the per-reason counts on the same line as the rest of
++        // the outcome bookkeeping (denominator = total jobs seen) so real runs show why coverage was lost.
++        void NoteFallback(string reason);
++
+         // frame: uncompressed header + 1 byte + tile data. probs: Vp9EntropyProbs bytes (3087). prevMvs: the guest's MV
+         // read buffer (empty when UsePrevFrameMvs is 0). mvsOut: the guest's MV write buffer (16 bytes per 8x8), written
+         // on Decoded when ProducesGuestMetadata — otherwise left untouched (guest content is kept; nothing fabricated).

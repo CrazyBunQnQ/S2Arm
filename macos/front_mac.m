@@ -1,5 +1,6 @@
 // Opt-in Mac game shell. Game/library management lives in the separate launcher.
-// Input ABI is the existing s2a_vpad_read used by services/InputPump.cs.
+// Input ABI is the legacy s2a_vpad_read plus the event-driven s2a_vpad_read_ex
+// (A2) used by services/InputPump.cs when the host exports it.
 #include <dlfcn.h>
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -127,12 +128,41 @@ static void publish(uint32_t buttons, const int32_t sticks[4]) {
     for (int i = 0; i < 4; i++) atomic_store_explicit(&input_sticks[i], sticks[i], memory_order_seq_cst);
     atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
 }
+static GCExtendedGamepad *active_pad(NSArray *controllers);
+// 事件驱动输入（A2）：同一份前端状态同时写进 runtime/src/pad.c，InputPump 找到 s2a_vpad_read_ex 后就等
+//   s2a_pad_wait 的序号通知，不再 Thread.Sleep(16)。有扩展手柄时按系统手柄源发布（键盘 / 鼠标仍并进同一份状态），
+//   没有手柄时按触屏源发布；两个源互斥的语义由 pad.c 管，Mac 不另造第三份选源状态。
+static void publish_pad_state(int has_pad, uint32_t buttons, const int32_t sticks[4]) {
+    if (has_pad) { s2a_pad_update(S2A_PAD_SYSTEM, focused ? 1 : 0, buttons, sticks); return; }
+    // 没手柄时必须先补一次 SYSTEM 断开：pad.c 的 selected() 只看 connected，不发就仍选 SYSTEM 并丢掉 TOUCH 更新，
+    //   手柄断开瞬间按住的键会卡住、键盘也失灵（维护方 11-09 用 pad.c 最小程序复现：0x1，期望 0x2）。
+    s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, sticks);
+    s2a_pad_update(S2A_PAD_TOUCH, focused ? 1 : 0, buttons, sticks);
+}
+static void publish_pad(uint32_t buttons, const int32_t sticks[4]) {
+    publish_pad_state(active_pad(GCController.controllers) != nil, buttons, sticks);
+}
+static void publish_input(uint32_t buttons, const int32_t sticks[4]) {
+    publish(buttons, sticks);
+    publish_pad(buttons, sticks);
+}
 // 鼠标不回中（审计 P2-62：赛车预设写了 mouseOptions.recenter = false，原生读取从不看它，停手照样回中）：
 //   回中（缺省）= 每次读把这一拍的位移加进右摇杆后清零；不回中 = 位移累进一个保持量，停手后右摇杆停在原处，失焦 / 复位清零
 static _Atomic int mouse_hold;   // 1 = 不回中；配置装好时由 apply_mouse_options 设
 static _Atomic int64_t hold_x, hold_y;
 static void apply_mouse_options(void) { atomic_store(&mouse_hold, [config[@"mouseOptions"][@"recenter"] isEqual:@NO]); }
 static int64_t clamp_stick(int64_t v) { return MAX(-32767, MIN(32767, v)); }
+// 鼠标位移由 HID 读取线程消费一次；s2a_vpad_read（旧 ABI）与 s2a_vpad_read_ex（事件驱动 ABI）共用这一份。
+static void take_mouse_delta(int32_t sticks[4]) {
+    int64_t dx = atomic_exchange_explicit(&mouse_dx, 0, memory_order_relaxed);
+    int64_t dy = atomic_exchange_explicit(&mouse_dy, 0, memory_order_relaxed);
+    if (atomic_load(&mouse_hold)) {
+        int64_t x = clamp_stick(atomic_load(&hold_x) + dx), y = clamp_stick(atomic_load(&hold_y) + dy);   // 只有 HID 读线程写保持量；复位在主线程清零
+        atomic_store(&hold_x, x); atomic_store(&hold_y, y); dx = x; dy = y;
+    }
+    sticks[2] = (int32_t)clamp_stick((int64_t)sticks[2] + dx);
+    sticks[3] = (int32_t)clamp_stick((int64_t)sticks[3] + dy);
+}
 __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read(int32_t *sticks) {
     uint32_t a, b, buttons;
     do {
@@ -142,15 +172,14 @@ __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read(int32_t *sti
         for (int i = 0; i < 4; i++) sticks[i] = atomic_load_explicit(&input_sticks[i], memory_order_seq_cst);
         b = atomic_load_explicit(&input_seq, memory_order_seq_cst);
     } while ((a & 1) || a != b);
-    int64_t dx = atomic_exchange_explicit(&mouse_dx, 0, memory_order_relaxed);
-    int64_t dy = atomic_exchange_explicit(&mouse_dy, 0, memory_order_relaxed);
-    if (atomic_load(&mouse_hold)) {
-        int64_t x = clamp_stick(atomic_load(&hold_x) + dx), y = clamp_stick(atomic_load(&hold_y) + dy);   // 只有 HID 读线程写保持量；复位在主线程清零
-        atomic_store(&hold_x, x); atomic_store(&hold_y, y); dx = x; dy = y;
-    }
-    sticks[2] = (int32_t)clamp_stick((int64_t)sticks[2] + dx);
-    sticks[3] = (int32_t)clamp_stick((int64_t)sticks[3] + dy);
+    take_mouse_delta(sticks);
     return buttons;
+}
+// InputPump 按符号查这个导出（services/S2A.Services/InputPump.cs）：有它就走 pad.c 的序号 / 条件变量，
+//   按键和摇杆从快照读，鼠标位移仍在这里消费一次。没有它的宿主继续用 s2a_vpad_read + Sleep(16)。
+__attribute__((visibility("default"), used)) void s2a_vpad_read_ex(s2a_pad_snapshot *out) {
+    s2a_pad_read_ex(out);
+    take_mouse_delta(out->axes);
 }
 static NSMutableDictionary<NSNumber *, NSNumber *> *key_up_polls;   // 系统报「已松开」连续采样次数（见 release_stale_keys）
 // 被采样判成松开、没收到 keyUp 的键：其后系统报按下或自动重复证明还按着，可恢复
@@ -165,7 +194,7 @@ static void reset_input(void) {
     atomic_store_explicit(&mouse_dx, 0, memory_order_relaxed);
     atomic_store_explicit(&mouse_dy, 0, memory_order_relaxed);
     atomic_store(&hold_x, 0); atomic_store(&hold_y, 0);
-    int32_t sticks[4] = {0}; publish(0, sticks);
+    int32_t sticks[4] = {0}; publish_input(0, sticks);
     touch_end();   // 失焦 / 关窗：按着的触点补一帧 End（定义在下面鼠标触屏段）
 }
 static void sample_input(void);
@@ -584,9 +613,9 @@ static void sample_input(void) {
     GCExtendedGamepad *active = focused ? active_pad(GCController.controllers) : nil;
     sample_motion(active);
     if (active) rumble_select(active.controller);   // 失焦不换会话：切回来同一个手柄接着震
-    if (!focused) { publish(0, sticks); return; }
+    if (!focused) { publish_input(0, sticks); return; }
     sample_home_quit(active);
-    if (g_hq.open) { publish(0, sticks); return; }
+    if (g_hq.open) { publish_input(0, sticks); return; }
     NSDictionary *keyboard = config[@"keyboard"];
     NSUInteger consumed = 0;
     for (NSString *name in keyboard) {
@@ -644,7 +673,7 @@ static void sample_input(void) {
         }
     }
     for (int i = 0; i < 4; i++) sticks[i] = MAX(-32767, MIN(32767, sticks[i]));
-    publish(buttons, sticks);
+    publish_input(buttons, sticks);
 }
 
 // keyUp 可能在菜单或其他响应者处被消费。定时采样只核对本窗口已经接收的键，
@@ -886,9 +915,12 @@ static __weak S2AMacDelegate *g_delegate;
         self.ns2ReconnectPending = YES;
         self.ns2RelayDisconnectNoticeShown = NO;
     }
+    const char *relay = getenv("S2A_NS2_SOCKET");
+    BOOL relayMode = relay && *relay;
+    // 开局时 S2Arm 可能还没开连接程序（玩家开局后才连手柄）：通道文件出现才去连，接上前不提示（ns2_controller.c s2a_mac_ns2_relay_due）
+    if (self.ns2ReconnectPending && s2a_mac_ns2_relay_due(controller, relay)) s2a_mac_ns2_connect();
     if (self.ns2ReconnectPending && (controller == NS2_STATUS_ERROR || controller == NS2_STATUS_DISCONNECTED)) {
-        const char *relay = getenv("S2A_NS2_SOCKET");
-        if (relay && *relay) {
+        if (relayMode) {
             if (!self.ns2RelayDisconnectNoticeShown) {
                 [self.banner showTitle:@"Switch 2 Pro" body:@"S2Arm 手柄连接已中断；重新连接后游戏会自动接回。" accept:nil decline:nil seconds:12];
                 self.ns2RelayDisconnectNoticeShown = YES;
@@ -916,7 +948,7 @@ static __weak S2AMacDelegate *g_delegate;
 }
 - (void)shutdown {
     display_focus_publish_ex(NO, NO);
-    set_mouse_capture(NO); focused = NO; reset_input();
+    set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_mac_ns2_detach(); s2a_host_shutdown("Mac 窗口关闭"); });
 }
 // 菜单栏「切换游戏」：先留标记（S2A_RETURN_MARKER，开局作业给的路径），再走关窗同一条收尾（等存档写完）；作业见到标记，启动器回到游戏库并切到前台。
@@ -930,9 +962,9 @@ static __weak S2AMacDelegate *g_delegate;
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; [self shutdown]; return NO; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender { (void)sender; [self shutdown]; return NSTerminateCancel; }
-- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; reset_input(); }
-- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; reset_input(); }
-- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; reset_input(); }
+- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; s2a_pad_set_active(1); reset_input(); }
+- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
+- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
 - (void)applicationDidBecomeActive:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); focused = self.window.isKeyWindow; }
 @end
 
@@ -1061,6 +1093,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         }
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
         [app activateIgnoringOtherApps:YES]; focused = YES;
+        s2a_pad_set_active(1);
         install_pad_handlers();
         display_focus_publish(app.isActive && window.isKeyWindow);
         delegate.inputGuide = [[S2AMacInputGuide alloc] initWithName:window.title gameID:gameIdentity[@"gameId"] mapping:config gameWindow:window];
@@ -1077,6 +1110,7 @@ void s2a_front_run(void (*guest_main)(void)) {
             s2a_mac_ns2_connect();
         }
         [app run];
+        s2a_pad_set_active(0);
         display_focus_publish_ex(NO, NO);
         set_mouse_capture(NO); focused = NO; reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
     }

@@ -51,6 +51,7 @@ static UIViewController *top_controller(void) {
     UIWindow *key = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        if ([scene.session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) continue;   // 外接屏窗口（extdisplay.m）不能输入，键盘框不往那里弹
         for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) key = w;
         if (!key) key = ((UIWindowScene *)scene).windows.firstObject;
     }

@@ -27,15 +27,19 @@ public static class UpdateClient
     }
 
     /// <summary>跑一条 updater 命令，逐行交 JSON，返回最后一行；起不来或超时返回 null。</summary>
-    public static async Task<JsonElement?> RunAsync(LauncherPaths paths, IEnumerable<string> command, Action<JsonElement>? onEvent, TimeSpan limit)
+    public static Task<JsonElement?> RunAsync(LauncherPaths paths, IEnumerable<string> command, Action<JsonElement>? onEvent, TimeSpan limit) =>
+        RunScriptAsync(paths, "updater.py", command, onEvent, limit);
+
+    /// <summary>用随包 Python 跑 pack/jobs 下一个只用标准库的脚本（updater.py、batch.py），逐行交 JSON，返回最后一行；起不来或超时返回 null。</summary>
+    internal static async Task<JsonElement?> RunScriptAsync(LauncherPaths paths, string script, IEnumerable<string> command, Action<JsonElement>? onEvent, TimeSpan limit)
     {
         var python = Path.Combine(Path.GetFullPath(paths.Runtime), "python", "python.exe");
-        var updater = Path.Combine(Path.GetFullPath(paths.Engine), "pack", "jobs", "updater.py");
+        var scriptPath = Path.Combine(Path.GetFullPath(paths.Engine), "pack", "jobs", script);
         JsonElement? last = null;
         using var cancel = new CancellationTokenSource(limit);
         try
         {
-            using var process = Process.Start(Start(python, new[] { updater }.Concat(command)))!;
+            using var process = Process.Start(Start(python, new[] { scriptPath }.Concat(command)))!;
             process.StandardInput.Close();
             var drain = process.StandardError.ReadToEndAsync(cancel.Token);
             while (await process.StandardOutput.ReadLineAsync(cancel.Token) is { } line)

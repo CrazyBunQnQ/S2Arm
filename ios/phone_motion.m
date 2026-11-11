@@ -29,7 +29,7 @@ static _Atomic int g_orient = (int)UIInterfaceOrientationLandscapeRight;
 static void orient_refresh(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
-            if ([s isKindOfClass:UIWindowScene.class]) {
+            if ([s isKindOfClass:UIWindowScene.class] && ![s.session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) {   // 朝向取手机屏的场景，不取外接屏的（extdisplay.m）
                 UIInterfaceOrientation o = ((UIWindowScene *)s).effectiveGeometry.interfaceOrientation;
                 if (o == UIInterfaceOrientationLandscapeLeft || o == UIInterfaceOrientationLandscapeRight) atomic_store(&g_orient, (int)o);
                 break;

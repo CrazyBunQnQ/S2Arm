@@ -264,6 +264,22 @@ def android_sdk_home(env):
     return str(home / ('Library/Android/sdk' if platform.system() == 'Darwin' else 'Android/Sdk'))
 
 
+def host_signer_env(build_source, env):
+    """host 后端验签用的环境：构建由 host/hostenv.sh 经 tools/jdk17.sh 找 JDK 17（Homebrew 装的不进 PATH、
+    也不登记 java_home），apksigner 是 Java 程序，要用同一个 JDK，否则落到 Mac 的 /usr/bin/java 空壳。"""
+    if java_runtime_ok(env):
+        return env
+    try:
+        found = subprocess.run(['bash', str(Path(build_source) / 'android/tools/jdk17.sh')], env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return env
+    javac = found.stdout.strip() if found.returncode == 0 else ''
+    if not javac:
+        return env
+    home = str(Path(javac).parent.parent)
+    return {**env, 'JAVA_HOME': home, 'PATH': str(Path(home) / 'bin') + os.pathsep + env.get('PATH', os.defpath)}
+
+
 def verify_signature(build_source, apk, env, backend, variant='release'):
     sdk = android_sdk_home(env)
     pinned = Path(sdk) / 'build-tools' / sdk_pins()['build-tools'] / 'apksigner'
@@ -273,7 +289,7 @@ def verify_signature(build_source, apk, env, backend, variant='release'):
     if local and backend == 'docker' and not java_runtime_ok(env):
         local = None
     if local:
-        subprocess.run([local, 'verify', str(apk)], env=env, check=True)
+        subprocess.run([local, 'verify', str(apk)], env=host_signer_env(build_source, env) if backend == 'host' else env, check=True)
     elif backend == 'docker':
         image = env.get('S2ARM_ANDROID_IMAGE', 's2arm-android-build:1')
         subprocess.run(['docker', 'run', '--rm', '--network', 'none',

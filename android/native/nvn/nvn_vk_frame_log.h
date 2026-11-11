@@ -15,7 +15,7 @@
 // 同域）。fence 字段 = 距上一条 present 之间累计的等待次数与等待时长（µs），present
 // 时刻原子快照并清零——仍在飞的等待记进下一帧。
 //
-// 存储与转储：每帧一条 24B 记录进定长环形缓冲（32768 帧 × 24B = 768 KB 静态，
+// 存储与转储：每帧一条 32B 记录进定长环形缓冲（32768 帧 × 32B = 1 MB 静态，
 // 60fps 约 9.1 分钟；写满覆盖最旧的、丢弃数可见）；会话收尾同时写应用内部私有文件与 logcat 分片。文件按进程号命名，
 // 使用 Context 注入的 filesDir；debuggable 包可经 run-as 只读取回。direct 在 adapter shutdown 转储，generic 在
 // AndroidGameRuntime.Cleanup 的 StopGpu 后转储。宿主解析：android/direct_framelog.py。
@@ -33,16 +33,22 @@ extern "C" {
 
 #define S2A_FL_CAP 32768u   /* 保留最近 32768 帧 */
 
-// v3 记录 = 24B：u64 ts，u32 fence_wait_us/fence_n/acquire_us/present_us。
-// acquire/present 的 UINT32_MAX 表示未采集或饱和，不得解释为零。
+// v5 记录 = 40B：u64 ts，u32 fence_wait_us/fence_n/acquire_us/present_us/gpu_us/gpu_seq/
+// disp_us/disp_seq。acquire/present 的 UINT32_MAX 表示未采集或饱和，不得解释为零；
+// gpu_us/gpu_seq 与 disp_us/disp_seq 的 UINT32_MAX 表示无新结算/确认（不写 0，
+// 对齐 iOS gpu_us / disp_us 空口径）。
 struct s2a_fl_rec {
     uint64_t ts;            /* 成功 present 返回点的 CLOCK_BOOTTIME 微秒戳 */
     uint32_t fence_wait_us; /* 距上一条 present 之间 fence 等待总时长（µs，封顶 UINT32_MAX） */
     uint32_t fence_n;       /* 同期 fence 等待次数（封顶 UINT32_MAX） */
     uint32_t acquire_us;     /* 本帧 AcquireNextImage CPU 墙钟 us */
     uint32_t present_us;     /* 本帧 QueuePresent CPU 墙钟 us */
+    uint32_t gpu_us;         /* 最新结算帧 GPU TOP→BOTTOM 忙时 us（同一结算帧只报一次） */
+    uint32_t gpu_seq;        /* 该读数对应的结算帧序号（gpu_read_frame 的 frame_seq） */
+    uint32_t disp_us;        /* 最新确认上屏间隔 us（actualPresentTime 相邻帧差，同一对只报一次） */
+    uint32_t disp_seq;       /* 该间隔所属的较新帧号（nvn_vk_dt_last_gap 的 frame） */
 };
-#define S2A_FL_REC_BYTES 24u
+#define S2A_FL_REC_BYTES 40u
 
 struct s2a_frame_log {
     struct s2a_fl_rec rec[S2A_FL_CAP]; /* 环形：最近 kept 个成功 present 的记录 */
@@ -78,9 +84,9 @@ uint32_t s2a_fl_fence_us(const struct s2a_frame_log *fl, uint64_t i);
 uint32_t s2a_fl_fence_n(const struct s2a_frame_log *fl, uint64_t i);
 
 // 转储回调：emit 收到不含换行的完整单行。分片格式（与 direct device caps[i/n] 同例）：
-//   direct frame-log meta: v=3 clock=<名> unit=us endian=le rec=24 cap=<CAP> recorded=<kept>
-//                            presents=<seq> dropped=<dropped> first=<first> bytes=<kept*24> chunks=<n>
-//   direct frame-log[<i>/<n>]:<base64，载荷 = kept 条 24B LE 记录，最旧→最新>
+//   direct frame-log meta: v=4 clock=<名> unit=us endian=le rec=32 cap=<CAP> recorded=<kept>
+//                            presents=<seq> dropped=<dropped> first=<first> bytes=<kept*32> chunks=<n>
+//   direct frame-log[<i>/<n>]:<base64，载荷 = kept 条 32B LE 记录，最旧→最新>
 //   direct frame-log end: frames=<kept> dropped=<dropped> sha256=<载荷小写 hex>
 void s2a_fl_dump(const struct s2a_frame_log *fl, void (*emit)(void *ctx, const char *line), void *ctx);
 

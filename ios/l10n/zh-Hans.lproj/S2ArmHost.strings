@@ -180,7 +180,7 @@
 "vpad.layouts.touch.note" = "游戏自己的触屏操作用这项；虚拟按键会关掉，四指长按 1.5 秒可切回";
 "vpad.menu.editDisabled" = "仅触屏操作时没有按键可编辑";
 "vpad.menu.face.letter" = "按键按字母对应";
-"vpad.menu.face.letter.note" = "Xbox 的 A 就是 Switch 的 A";
+"vpad.menu.face.letter.note" = "Xbox 的 A、PlayStation 的 × 就是 Switch 的 A";
 "vpad.menu.face.position" = "按键按位置对应";
 "vpad.menu.face.position.note" = "按 Switch 的按键位置";
 "vpad.menu.gyro" = "手机陀螺仪";
@@ -224,12 +224,12 @@
 "about.unknown" = "未知";
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
+"app.fpsCap.ladder" = "这台设备暂时跑不稳 60 帧，已回到原生帧率；跑稳后会自动再试 60 帧。";
 "app.fpsCap.lowPower" = "低电量模式开着，已暂时回到原生帧率，关掉低电量模式后自动恢复。";
 "app.fpsCap.restored" = "60 帧已恢复。";
 "app.fpsCap.thermal" = "手机温度过高（危急），已暂时回到原生帧率，降温后自动恢复。";
 "app.gpuStop.body" = "请从后台划掉本 App，再重新打开游戏。\nPlease reopen the game.";
 "app.gpuStop.title" = "画面出错，已停止\nGraphics error — stopped";
-"app.ladder.title" = "画面档位";
 "app.library.broken.title" = "游戏资源不完整";
 "app.library.cantOpen" = "这款游戏打不开";
 "app.library.cantOpen.message" = "启动这款游戏前的准备没做完。请从后台划掉 App 后重新打开再试；还是不行的话，导出诊断包发给我们。";
@@ -356,9 +356,8 @@
 "save.inspected" = "备份检查通过，等待确认。";
 "save.intro" = "游戏尚未启动。可导出存档到“文件”，或导入 Mac / 其他设备的 .s2asave 备份。恢复前会保留当前存档。";
 "save.journalUnreadable" = "读不到存档操作记录目录（%@），没法确认上次的导入 / 恢复有没有做完。\n%@";
-"save.location" = "存档文件放在这里：打开“文件”App →“我的 iPhone”（iPad 为“我的 iPad”）→“%@”→ %@\n\n把存档文件直接放进最后那个“0”文件夹。放之前先把里面原有的文件拷到别处备份，放好后回到这里点“开始游戏”。\n\n从电脑拷过来：Mac 在访达侧边栏选中这台设备 →“文件”，把存档文件夹拖到“%@”上，再到“文件”App 里把文件挪进上面那个“0”文件夹。";
-"save.location.none" = "这款游戏还没有存档文件夹：先开始游戏、在游戏里存一次档，再回到这里，这里会写出存档要放进的文件夹。";
-"save.location.or" = "有几份存档时每个编号文件夹各是一份（账号存档 / 设备存档），按游戏原来的文件对上再放：";
+"save.location" = "存档位置：打开“文件”App →“我的 iPhone”（iPad 为“我的 iPad”）→“%@”→ %@\n\n把原生格式的存档文件夹放进去（主机、JKSV / Checkpoint 等工具导出的，或电脑上同一款游戏 SaveData 里拷来的都行），下次开始游戏就用它；退出游戏后这里会更新成最新进度，整个文件夹拷到电脑或另一台设备的同一位置就能接着玩。\n\n从电脑拷过来：Mac 在访达侧边栏选中这台设备 →“文件”，把文件夹拖到“%@”上，再到“文件”App 里挪进上面的位置。";
+"save.location.problem" = "上次放进来的存档没读进来：%@。当前存档没有改动。";
 "save.noRoot" = "无法访问存档位置，这次不能导入或导出存档。可以先关闭后重新打开；也可以「仍要开始游戏…」照常进游戏。";
 "save.noService" = "此安装包缺少存档迁移所需的游戏身份或服务。请用新版 S2Arm 重新打包安装。当前存档仍可照常使用。";
 "save.noService.recover" = "此安装包缺少存档迁移所需的游戏身份或服务，无法恢复上次中断的存档操作。";
@@ -416,6 +415,8 @@
 "settings.toggle.devHud" = "显示 S2Arm 诊断浮层";
 "settings.toggle.diagOnOpen" = "下次打开时导出诊断包";
 "settings.toggle.docked" = "主机模式";
+"settings.toggle.diagRun" = "诊断局（下一局）";
+"settings.diagRun.note" = "打开后从后台划掉、重新进这款游戏，到出问题的地方待 3 分钟以上，再导出诊断包。只管下一局，这一局画面会变慢。";
 "settings.docked.note" = "画质更高，但更耗电、更容易发热；手机上不建议开";
 "settings.toggle.metalHud" = "显示 Metal 性能浮层";
 "settings.toggle.phoneHaptics" = "手机震动";

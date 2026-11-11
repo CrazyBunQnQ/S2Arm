@@ -920,24 +920,13 @@ static int32_t prepare(const struct s2a_graphics_descriptor_v1 *descriptor, uint
     pthread_mutex_unlock(&g_window_mu);
     atomic_store(&g_owner_suspended_slices, 0);
     atomic_store(&g_owner_window_actions, 0);
-    // 首版正式 direct 必须真的启用 VK_EXT_swapchain_maintenance1 的 present fence：只有渲染 fence
-    // 能证明“画完”，不能证明呈现引擎已释放图像。缺项在 commit 前拒绝，AUTO 因此走 generic。
-    if (!ctx->device.swapchain_maintenance1_enabled) {
-        snprintf(why, why_size,
-                 "presentation-retirement proof unavailable: VK_EXT_swapchain_maintenance1/"
-                 "swapchainMaintenance1 is not enabled on this device");
-        pthread_mutex_lock(&g_window_mu);
-        if (g_active_context == ctx) g_active_context = NULL;
-        pthread_mutex_unlock(&g_window_mu);
-        if (s2a_vk_device_destroy(&ctx->device, 0)) {
-            pthread_mutex_lock(&g_window_mu);
-            g_retained_context = ctx;
-            pthread_mutex_unlock(&g_window_mu);
-            return S2A_DIRECT_RES_RETIREMENT;
-        }
-        free(ctx);
-        return S2A_DIRECT_RES_UNSUPPORTED;
-    }
+    // 呈现退休证明：有 VK_EXT_swapchain_maintenance1 用 present fence；没有（安卓 13 及以下的系统
+    // libvulkan 不补，#426）由交换链改用同图像再 acquire 的 fence 证明（nvn_vk_swapchain.c）。
+    // 两种都不拿渲染 fence 冒充呈现退休，所以这里不再拒绝 direct，只记下走的是哪种。
+    __android_log_print(ANDROID_LOG_INFO, TAG, "direct presentation retirement: %s",
+                        ctx->device.swapchain_maintenance1_enabled
+                            ? "present fence (VK_EXT_swapchain_maintenance1)"
+                            : "same-image reacquire (no VK_EXT_swapchain_maintenance1)");
     ctx->state = S2A_DIRECT_PREPARED;
     ctx->blockers = S2A_DIRECT_BLOCK_ALL;
     ctx->generation = 1;   // provider 上下文代际：Stop/重建才有新值；transport 身份，不参与内容键
@@ -1042,8 +1031,8 @@ static int32_t prepare(const struct s2a_graphics_descriptor_v1 *descriptor, uint
                         VK_API_VERSION_MINOR(ctx->device.properties.apiVersion),
                         VK_API_VERSION_PATCH(ctx->device.properties.apiVersion), effective_profile_hash);
     // READY admission 的 GPU 身份门找的是 generic VulkanRenderer 的 PrintGpuInformation 行。
-    // 这行本身必须证明直连 prepare 走完：只能打在上面三道拒绝闸（storage 能力 /
-    // swapchain_maintenance1 / profile 合成）全部通过之后、返回 OK 之前；否则被拒时日志里
+    // 这行本身必须证明直连 prepare 走完：只能打在上面两道拒绝闸（storage 能力 /
+    // profile 合成）全部通过之后、返回 OK 之前；否则被拒时日志里
     // 仍有身份行，AUTO 转 generic 再失败会被这行误判 READY 通过（假绿）。
     // 值只来自本机 VkPhysicalDeviceProperties / driverProperties。
     {

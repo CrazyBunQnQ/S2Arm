@@ -6,7 +6,7 @@ R=$(cd "$(dirname "$0")/.." && pwd)
 # Fail clearly without downloading tools or treating missing SDK as a passing test.
 if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks | grep -q '^10\.'; then
   echo "缺少 .NET 10 SDK：请按 CONTRIBUTING.md 安装微软官方 SDK 后重跑；未执行合成宏验证" >&2
-  exit 2
+  exit 75   # 缺 .NET 10 SDK = 这支没跑（环境未就绪，审计 P1-158），不是代码红也不是通过
 fi
 # Select an actually installed UTF-8 locale (Linux and macOS use different names).
 UTF8=

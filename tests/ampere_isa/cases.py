@@ -111,6 +111,12 @@ for wrap in (1, 0):
     case(f'BMSK{".W" if wrap else ""} 寄存器形式', True, [v for p in ins for v in p], body, [bmsk(p, w, wrap) for p, w in ins], 'PTX bmsk.wrap / .clamp')
 case('BMSK.W 立即数宽度（形式 4：宽度在 32..64）', True, [12], [MOVC(4, 0), alu(0x01b, 4, 0, 4, w=(75, 1), imm=(32, 4)), MOVI(1, 0), MOVI(2, 0), MOVI(3, 0)],
      [bmsk(12, 4, 1), 0, 0, 0], 'PTX bmsk.wrap')
+# ---- S2UR URd, SR 0x84（0x9c3，SR 号 72..80）：Switch 2 片元着色器读它、UPRMT 取第 1 / 2 字节（0x7771 / 0x7772）后当除数（04008E001F098000 有 611 支）----
+#   看作粗粒度着色（可变着色率）的片元宽 / 高：宿主按全速率着色 = 1 × 1。原先 SReg 表没有 0x84、走 default 给 0，着色器算出 1 / 0（海面 Inf / NaN，自动曝光被拖垮）
+UPRMT = lambda urd, ura, sel: alu(0x096, 4, urd, ura, imm=(32, sel), rc=(64, URZ))   # UPRMT URd, URa, imm32, URc（形式 4，同反汇编 0x896：选择子在 32..64，第三源 URc 在 64..70）
+case('S2UR SR 0x84（片元粗着色尺寸：第 1 / 2 字节 = 1 × 1）', True, [],
+     [inst(0x9c3, urd=(16, 4), sr=(72, 0x84)), UPRMT(5, 4, 0x7771), UPRMT(6, 4, 0x7772), MOVU(0, 4), MOVU(1, 5), MOVU(2, 6), MOVI(3, 0)],
+     [0x00010100, 1, 1, 0], '宿主全速率着色：宽 = 高 = 1（游戏的 611 支只取这两个字节；其余字节没有读者，按 0）')
 case('UBMSK（统一数据通路，UR 6 位寄存器号）', True, [3, 7], [ULDC(4, 0), ULDC(5, 1), alu(0x09b, 1, 6, 4, w=(75, 1), **R(5)), MOVU(0, 6), MOVI(1, 0), MOVI(2, 0), MOVI(3, 0)],
      [bmsk(3, 7, 1), 0, 0, 0], 'PTX bmsk.wrap')
 
@@ -472,6 +478,23 @@ refl('ISBERD.b8 读回任务自己写的载荷字（时之笛 5d3a096025e375a1�
      lambda msl, j: (lambda m: None if m and re.search(r'= (?:as_type<\w+>\()?%s\[%s\]' % (m.group(1), m.group(2)), msl) and re.search(r'%s\[%d\] = ' % (m.group(1), int(m.group(2)) + 1), msl)
                      else '读回的不是刚写的那个阶段内存字（或没写到 +0x14）')(re.search(r'(\w+)\[(\d+)\] = 4660u;', msl)),
      '写 [+0x10] = 0x1234、读回同一个字、再写 [+0x14]（下一个字）；修前「ISBERD mode b8 in a task or mesh shader」拒翻')
+
+# 投票的位掩码留在原处（04008E001F098000 近海任务着色器 8acb4308：最低活动车道之外都 return 之后才写 popcount(ballot)）：任务着色器 32 线程，
+#   S2R R0 = 车道号，P1 = 车道号 != 0，VOTE.ANY R5 ← ballot(P1)（31 个车道置位），全体车道先写 POPC(R5) 到载荷 +0x10，@P1 EXIT，剩下的车道 0 再写 POPC(R5) 到 +0x14。
+#   期望（手推）：位掩码在 return 之前就取（硬件上 VOTE 执行时 32 车道都在：两处 POPC 都是 31）。修前 AST 优化把位掩码（一元运算、源是变量，用两次也挪）
+#   复制到每个使用处，第二处落在其他车道 return 之后，只剩车道 0 自己（它的 P1 假，POPC = 0；近海每组 32 块只画 1 块）。
+#   用任务着色器：计算着色器这条单测链不做表达式传播，测不出来；谓词要是车道变量：常量 ballot(true) 修前也不挪
+VOTE_ANY = lambda rd, p: inst(0x806, rd=(16, rd), mode=(72, 1), pd=(81, PT), p=(87, p))
+POPC = lambda rd, rb: alu(0x109, 1, rd, RZ, rb=(32, rb))
+def at_p1(v): return v & ~(0xf << 12) | 1 << 12   # 守卫 @P1
+def ballot_before_return(msl, j):
+    body = msl[msl.find('dm_stage_body'):] if 'dm_stage_body' in msl else msl
+    r = body.find('return;'); bs = [m.start() for m in re.finditer(r'spvSubgroupBallot\(', body)]
+    if not bs: return 'MSL 里没有 spvSubgroupBallot'
+    return None if r < 0 or max(bs) < r else '位掩码在其他车道 return 之后才取'
+refl('投票位掩码不挪过提前返回（近海 8acb4308）', True,
+     ts_shader([S2R(0, 0x00), ISETP_NE(1, 0, RZ), VOTE_ANY(5, 1), POPC(7, 5), STO(0x10, 7), at_p1(EXIT), POPC(6, 5), STO(0x14, 6)]),
+     ballot_before_return, 'VOTE 在全体车道都在时取位掩码，车道 0 之后才 POPC：位掩码不能等到 POPC 处才算')
 
 # 多处池表读（11-05 时之笛慢编；11-07 时之笛主遍顶点）：地址从内存里读出来的全局读，翻译器追不到具体存储缓冲，走查内存池表。11-05 把整个查表函数改成不内联（每处一份展开时
 # 3d0d6d61bb9076e7 253 处、IR 6.5 万条），可函数带线程私有字（上次命中项）的引用，调用点按调用约定存栈取栈：时之笛主遍顶点着色器每顶点 253 次调用、主遍六成时间。

@@ -152,9 +152,47 @@ class SpaceMeasured(JobCase):
         self.assertEqual(self.need(17_480_000_000, windows=False), 19_228_000_000 + 15_000_000_000)
         self.assertEqual(self.need(2_700_000_000, windows=False), 2_970_000_000 + 5_000_000_000)
 
+    def test_shared_original_sums_item_contents(self):
+        # #444：一个压缩合集（XCZ）装本体 + 更新，原件 10 GB，两项解开各 8 GB、6 GB → 要按 14 GB 算；原先只留最后一项 → max(10, 6) = 10 GB
+        shared = [dict(size=10_000_000_000, contentBytes=8_000_000_000, sha256="b" * 64),
+                  dict(size=10_000_000_000, contentBytes=6_000_000_000, sha256="b" * 64)]
+        self.assertEqual(library._pack_input_bytes(shared), 14_000_000_000)
+        # 不压缩的合集 / NUP：各项之和不超过原件 → 仍按原件；另一个原件照加
+        nup = [dict(size=10_000_000_000, contentBytes=7_000_000_000, sha256="c" * 64),
+               dict(size=10_000_000_000, contentBytes=2_000_000_000, sha256="c" * 64),
+               dict(size=3_000_000_000, sha256="d" * 64)]
+        self.assertEqual(library._pack_input_bytes(nup), 13_000_000_000)
+
+    def test_nup_items_overlap_take_largest(self):
+        # NUP 容器内按块去重，更新是整份文件系统、和本体共用数据块：0400486024DEC000 实测文件 25.62 GB、本体与更新各 26.27 GB
+        #   → 按 26.27 GB 算（取大值）；相加会成 52.54 GB（v0.2.5 的回退）。同一 sha 里只要有一项是 nup 就按这条算
+        nup = [dict(size=25_622_267_860, contentBytes=26_270_000_000, sha256="e" * 64, format="nup"),
+               dict(size=25_622_267_860, contentBytes=26_270_000_000, sha256="e" * 64, format="nup")]
+        self.assertEqual(library._pack_input_bytes(nup), 26_270_000_000)
+        # 另一个原件（非 nup）照旧单独加上
+        self.assertEqual(library._pack_input_bytes(nup + [dict(size=3_000_000_000, sha256="f" * 64, format="nsp")]), 29_270_000_000)
+
     def test_unpacked_counts_zero_and_windows_adds_a_copy(self):
         self.assertEqual(self.need(10_000_000_000, unpacked=True, windows=False), 15_000_000_000)
         self.assertEqual(self.need(10_000_000_000, windows=True), 11_000_000_000 * 2 + 15_000_000_000)
+
+    def test_budget_splits_location_and_cache_volumes(self):
+        # P1-165：存放位置与工具缓存在两块盘时，各按自己那份需求和自己的余量判；期望手算：原件 16 GB → 存放位置 16 × 1.1 = 17.6 GB，工具缓存 15 GB（≥ 3 GB 档）
+        c = self.context("ipa")
+        loc, cache = Path(self.root) / "ext", Path(self.root) / "cache"
+        class St:   # 两个假卷号
+            def __init__(self, dev): self.st_dev = dev
+        disks = {str(loc): (1, 20 * 10**9), str(cache): (2, 10 * 10**9)}
+        fake = lambda path: type("V", (), {"stat": lambda self, d=disks[str(path)][0]: St(d), "__fspath__": lambda self, p=str(path): p,
+                                           "__str__": lambda self, p=str(path): p})()
+        with patch.object(library, "_existing", side_effect=lambda p: fake(loc if p != c.work_root else cache)), \
+                patch("shutil.disk_usage", side_effect=lambda p: DU(0, 0, disks[os.fspath(p)][1])), \
+                patch.object(library, "_volume", side_effect=lambda p: os.fspath(p)):
+            vols = library.space_budget(c, self.game(16 * 10**9))["volumes"]
+        self.assertEqual([(v["role"], v["needBytes"], v["freeBytes"], v["enough"]) for v in vols],
+                         [("library", 17_600_000_000, 20 * 10**9, True), ("cache", 15_000_000_000, 10 * 10**9, False)])
+        # 同一块盘：合成一项，需求 = 两份之和（同原来）
+        self.assertEqual(self.budget(c, self.game(16 * 10**9))["needBytes"], 17_600_000_000 + 15_000_000_000)
 
     def test_ledger_does_not_change_budget(self):
         c = self.context("ipa")

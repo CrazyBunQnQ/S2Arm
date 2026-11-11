@@ -1,6 +1,6 @@
 #!/bin/bash
-# 门禁层：合入后
-# 门禁路由：runtime/ graphics/ services/ compat/ tests/autoplay/ tests/build.mk Makefile */build.mk platform/apple/cs/
+# 门禁层：合入后（路由命中时合入前也跑）
+# 门禁路由：ios/ runtime/ graphics/ services/ compat/ tests/autoplay/ tests/build.mk Makefile */build.mk platform/apple/cs/
 # 门禁 full 档：iOS 全量编译检查（10-20 维护者：任何一线弄坏 iOS 构建都在合入前拦下）——make ios S2A_CS=1 编译 + 链接出壳的主程序，再用一款现成改写产物写游戏镜像包（11-04 全外置），不签名、不出包。
 # GATE_IOS_MODS=<现有改写产物目录> 显式指定；未指定时从共享根任一款的现行选取（只读，保留01006F8002326000 / 马车 / 暗黑2的既有优先顺序）。
 # 显式目录无效就报红，不改用其他款；产物必须包含 main.npdm、模块映像及对应随行表，不下载游戏。

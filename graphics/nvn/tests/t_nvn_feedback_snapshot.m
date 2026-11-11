@@ -169,6 +169,22 @@ static void depth_case(NvProg *reader, prog_t *reader_p, tex_t *depth, tex_t *b,
     S.ds.dw=0; g_pso_dirty=1; uint64_t c2=g_fb_depth; draw(triangle,NULL);
     CHECK(g_fb_depth-c2==1,"after a depth-writing draw the next sampling draw copies again (new copies %llu)",(unsigned long long)(g_fb_depth-c2));
     finish(); CHECK(!mtl_last_commit_error(),"depth attachment sampled in its own pass: submission completes without a Metal error");
+    // Audit P2-247: a whole-surface depth clear with no pass open is only recorded (R.clear_d, folded into the next pass's load action). A draw sampling that depth in the pass must
+    //   see the cleared value, as on the Switch the clear is in memory before the draw runs: the copy is taken after the clear lands. Expected 0.75 (the clear), never the old 0.25
+    nvn_be_sub_begin(); state_reset(); S.prog=reader_p; S.tex[1][0]=4; S.tex[1][1]=2;
+    rp_flush(); memset(&R.rt, 0, sizeof R.rt); R.rt.n=3; R.rt.color[2]=out; R.rt.depth=depth; R.has_rt=1; g_pso_dirty=1; args_dirty_all();
+    R.clear_d=1; R.cd=0.25; rp_flush();   // old content 0.25 in the texture
+    dsnap_stale(); R.clear_d=1; R.cd=0.75;   // what OP_CLEAR_DS records with no pass open (full scissor, no stencil)
+    uint64_t c3=g_fb_depth; draw(triangle,NULL);
+    REQUIRE(g_fb_depth-c3==1 && g_dsnap.use);
+    id<MTLTexture> snap=g_dsnap.use; finish();
+    id<MTLBuffer> rb=[g_dev newBufferWithLength:16*4 options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> q=[g_dev newCommandQueue]; id<MTLCommandBuffer> cb=[q commandBuffer]; id<MTLBlitCommandEncoder> be=[cb blitCommandEncoder];
+    id<MTLTexture> sb=snap.parentTexture ? snap.parentTexture : snap;
+    [be copyFromTexture:sb sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64 options:MTLBlitOptionDepthFromDepthStencil];
+    [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    float d0=((float *)rb.contents)[0];
+    CHECK(d0==0.75f,"pending depth clear then same-pass sampling: the copy holds the cleared depth (read %g, expected 0.75)",d0);
 }
 
 int main(int argc, char **argv) {

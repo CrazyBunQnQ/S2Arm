@@ -49,13 +49,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                         if (propVar.Defs.Count == 1 && isWorthPropagating)
                         {
                             int effects = GetMemoryEffects(assignment.Source);
-                            if ((effects & MemoryEffect) == 0 &&
+                            if ((effects & (MemoryEffect | LaneDependent)) == 0 &&
                                 ((effects & MutableRead) == 0 ||
                                     (memoryPropagation ??= new(mainBlock)).CanPropagate(assignment, propVar)))
                             {
                                 PropagateExpression(propVar, assignment.Source);
                             }
-                            else if (propVar.Uses.Count > 0)
+                            else if (propVar.Uses.Count > 0 && (effects & LaneDependent) == 0)
                             {
                                 // Only branch where #1414 changes output: the old code propagated here.
                                 AstMemoryOrderStats.Kept++;
@@ -84,6 +84,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         // and only move mutable reads along paths with no intervening memory effect.
         private const int MutableRead = 1;
         private const int MemoryEffect = 2;
+        // S2Arm: a subgroup operation's result depends on which lanes are active where it runs. Moved to its use it can land after
+        //   the other lanes returned (a task shader's "leader lane writes popcount(ballot)": the ballot of the leader alone, one
+        //   mesh group instead of 32 — 04008E001F098000 near sea), so it stays at its definition. Removing an unused one is fine.
+        private const int LaneDependent = 4;
 
         private static int GetMemoryEffects(IAstNode node)
         {
@@ -99,6 +103,12 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     (StorageKind.ConstantBuffer or StorageKind.Input or StorageKind.InputPerPatch)))
             {
                 effects |= MutableRead;
+            }
+
+            if (inst is Instruction.Ballot or Instruction.VoteAll or Instruction.VoteAllEqual or Instruction.VoteAny or
+                Instruction.Shuffle or Instruction.ShuffleDown or Instruction.ShuffleUp or Instruction.ShuffleXor)
+            {
+                effects |= LaneDependent;
             }
 
             if (inst.IsAtomic() || inst is Instruction.ImageAtomic or Instruction.Call or

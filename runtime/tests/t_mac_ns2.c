@@ -2,8 +2,10 @@
 // Copyright 2026 S2Arm contributors
 #include "../../macos/ns2_controller.h"
 #include "../../macos/ns2_relay.h"
+#include "../../ios/haptic_retry.h"
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +63,7 @@ int main(void) {
     ns2_state input;
     s2a_pad_motion motion;
     unsetenv("S2A_NS2_SOCKET");
+    unsetenv("S2A_RUMBLE_SCALE");
     assert(!s2a_mac_ns2_read(&input) && !starts);
     s2a_mac_ns2_set_motion_enabled(1); // A game can request sensors before connection.
     assert(s2a_mac_ns2_connect() && starts == 1 && imu);
@@ -95,7 +98,7 @@ int main(void) {
     assert(motion.gyro_z == 180 && motion.acceleration_z == 1);
     const s2a_pad_vibration pair[2] = {{.2f, 160, .3f, 320}, {.4f, 80, .5f, 640}};
     s2a_mac_ns2_set_rumble_pair(session, pair);
-    assert(sends == 1 && sent[0].low_amp == .2f && sent[1].high_freq == 640);
+    assert(sends == 1 && sent[0].low_amp == s2a_hp_feel(.2f) && sent[1].high_freq == 640);
     s2a_mac_ns2_focus(0);
     assert(stops && !imu && !s2a_mac_ns2_rumble_session() && !s2a_mac_ns2_read(&input));
     assert(!s2a_mac_ns2_read_motion(&motion));
@@ -118,6 +121,7 @@ int main(void) {
     snprintf(socket_path, sizeof socket_path, "/tmp/s2arm-ns2-test-%d.sock", getpid());
     int listener = make_listener(socket_path);
     setenv("S2A_NS2_SOCKET", socket_path, 1);
+    setenv("S2A_RUMBLE_SCALE", "0.7", 1);
     assert(s2a_mac_ns2_connect());
     int relay = accept(listener, NULL, NULL);
     assert(relay >= 0);
@@ -157,7 +161,14 @@ int main(void) {
     memset(&packet, 0, sizeof packet);
     assert(receive_all(relay, &packet, sizeof packet));
     assert(packet.type == NS2_RELAY_RUMBLE && packet.duration_ms == 1000);
-    assert(packet.vibration[0].low_amp == .2f && packet.vibration[1].high_freq == 640);
+    assert(fabsf(packet.vibration[0].low_amp - s2a_hp_feel(.2f) * .7f) < .0001f);
+    assert(fabsf(packet.vibration[1].high_amp - .7f) < .0001f && packet.vibration[1].high_freq == 640);
+    setenv("S2A_RUMBLE_SCALE", "1.8", 1);
+    assert(s2a_mac_ns2_connect());
+    s2a_mac_ns2_set_rumble_pair(relay_session, pair);
+    assert(receive_all(relay, &packet, sizeof packet));
+    assert(packet.vibration[0].low_amp == 1 && packet.vibration[0].low_freq == 160);
+    unsetenv("S2A_RUMBLE_SCALE");
 
     s2a_mac_ns2_detach();
     assert(shutdowns == 2); // Closing a game socket leaves the physical relay alive.

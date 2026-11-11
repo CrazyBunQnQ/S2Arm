@@ -91,6 +91,26 @@ import S2ArmAppleAdapter
             guard let g = game() else { return .bad("没有这个 gameId") }
             return blocked(model.export(g, platforms: [.ios],
                                         deviceTarget: deviceTarget ?? (probe["connected"] as? [[String: Any]])?.first, spaceOverride: spaceOverride))
+        case ("POST", "/batch"):   // 批量出包（v0.2.4）：同界面清单页——建批次后一款接一款地出，进度看 GET /state 的 batch
+            if let r = busy() { return r }
+            if model.batchState != nil, model.batchSummary["done"] as? Bool != true {   // 上一批暂停着 / 没出完：不盖掉（审计 P2-270），同 Windows 回 409
+                return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": "上一批还没出完：在 S2Arm 的批量出包页「重试」/「继续」，或点「完成」清掉再建"]))
+            }
+            guard let rows = a["games"] as? [[String: Any]], !rows.isEmpty else { return .bad("games 要给 [{gameId, platforms:[mac|iphone]}]") }
+            var want: [String: [String]] = [:]
+            for row in rows {
+                guard let id = row["gameId"] as? String, model.games.contains(where: { $0.id == id }) else { return .bad("没有这个 gameId：\(row["gameId"] ?? "")") }
+                let ps = (row["platforms"] as? [String] ?? ["iphone"]).map { $0 == "ios" ? "iphone" : $0 }
+                guard !ps.isEmpty, ps.allSatisfy({ $0 == "iphone" || $0 == "mac" }) else { return .bad("platforms 只认 mac / iphone") }
+                want[id] = ps
+            }
+            if let loc = str("location") { model.batchLocation = loc }
+            model.openBatch(rows.compactMap { $0["gameId"] as? String })
+            for i in model.batchDraft.indices { let ps = want[model.batchDraft[i].id] ?? []; model.batchDraft[i].iphone = ps.contains("iphone"); model.batchDraft[i].mac = ps.contains("mac") }
+            let skipped = model.batchDraft.filter { $0.problem != nil }.map { ["gameId": $0.id, "reason": $0.problem ?? ""] }
+            // 一款都不能出 / 建批次失败：回 409、ok false（同 Windows），不先回成功让 s2armctl 空等或读上一批（审计 P1-166）
+            if let why = await model.createBatch() { return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": why, "skipped": skipped])) }
+            return .object(["ok": true, "skipped": skipped])
         case ("POST", "/build"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             switch str("target") ?? "ios" {
@@ -111,6 +131,19 @@ import S2ArmAppleAdapter
             model.install(g, teamId: str("teamId"), device: str("device"), acceptDropped: a["acceptDropped"] as? Bool ?? false, ask: false); return .ok()
         case ("POST", "/signingProject"):
             model.openSigningProject(); return .ok()
+        case ("POST", "/update-phone"):   // 更新 iPhone 上的 S2Arm（v0.3.0）：同库页右上角按钮；有要重新出包的款没给 acceptStale → 409 列出它们
+            if let b = busy() { return b }
+            guard let u = model.phoneUpdate else { return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": "按这台电脑的装机记录，手机上的 S2Arm 已是本版"])) }
+            let accept = a["acceptStale"] as? Bool ?? false
+            let stale = u.stale.map { ["gameId": $0.id, "name": $0.name] }
+            if a["ask"] as? Bool == true {   // 同玩家点库页右上角按钮：有要重新出包的款弹三选一（玩家在窗口里选），没有就直接更新
+                model.requestPhoneUpdate(language: "zh-Hans"); return .object(["ok": true, "asked": !u.stale.isEmpty, "stale": stale])
+            }
+            if !u.stale.isEmpty, !accept {
+                return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": "这几款要按新版重新出包，重新出包前暂时打不开：带 acceptStale 确认（repack 为真时更新完把它们排进批量出包、出完自动装）", "stale": stale]))
+            }
+            model.updatePhone(acceptStale: accept, repack: a["repack"] as? Bool == true ? u.stale.map(\.id) : [], language: "zh-Hans")
+            return .object(["ok": true, "stale": stale])
         case ("POST", "/restore-iphone"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             guard g.iphoneRestorable else { return .bad("没有可以装回的上一版手机 S2Arm") }
@@ -196,6 +229,16 @@ import S2ArmAppleAdapter
             return .ok(["note": "新界面没有引导页，已忽略"])
         case ("POST", "/environment"):
             model.checkEnvironment(); return .ok()
+        case ("POST", "/show"):   // 打开某一页（同玩家点标题栏「环境检查」/ 游戏的「出包」/ 回游戏库）：AI 照手册操作、截图核界面用
+            switch str("page") ?? "" {
+            case "environment": model.exportFor = nil; model.showEnvironment = true
+            case "export":
+                guard let g = game() else { return .bad("没有这个 gameId") }
+                model.showEnvironment = false; model.exportFor = g.id
+            case "library": model.showEnvironment = false; model.exportFor = nil
+            default: return .bad("page 只认 environment / export / library")
+            }
+            return .ok()
         case ("POST", "/refresh"):
             model.refresh(); return .ok()
         case ("POST", "/dismiss"):
@@ -225,6 +268,7 @@ import S2ArmAppleAdapter
         ["POST /games {paths:[…]}", "放入游戏（NSP / XCI 文件或文件夹；本体、更新、DLC 一起放）；放完会自动准备 Mac 运行"],
         ["POST /prepare {gameId}", "Mac 准备运行（出 Mac 版）"],
         ["POST /ipa {gameId, spaceOverride?}", "打 iPhone 包（出 IPA + 资源包）；没装 .NET SDK 会先自动装；spaceOverride = true 同界面「仍然继续」"],
+        ["POST /batch {games:[{gameId, platforms:[mac|iphone]}], location?}", "批量出包：一批几款、每款出哪些平台（同一款先 Mac 后 iPhone，解包只做一次），location = 一批共用的存放位置；一款接一款地出，失败不挡后面、磁盘满暂停；进度看 GET /state 的 batch（summary / items）"],
         ["POST /build {gameId, target, spaceOverride?}", "出包：spaceOverride = true 同界面「仍然继续」，磁盘预检不够也照出；target = ios（iPhone / iPad，缺省）| mac | android | harmony；安卓、鸿蒙回 409「即将上线，敬请期待」"],
         ["POST /customize {gameId, name?, coverPath?}", "改游戏显示名 / 封面（JPG、PNG）；不传的不动，传空字符串恢复默认；下次装到 iPhone 时带上"],
         ["POST /installCheck {gameId}", "装机前清单（只读）：几秒后看 GET /state 的 installReadiness"],
@@ -282,6 +326,10 @@ import S2ArmAppleAdapter
             "error": (m.actionError ?? (m.libraryError == LibraryProvider.noLibraryMessage ? nil : m.libraryError) ?? m.environmentError ?? m.installError ?? m.aiControlError).map { $0 as Any } ?? NSNull(),
             "installReadiness": rd,
             "update": m.updateStatus,
+            "installMode": ["mode": m.installMode.mode, "exportAvailable": m.installMode.exportAvailable],
+            "phoneUpdates": m.phoneUpdates.map { u in ["device": u.device, "games": u.games.map(\.id), "stale": u.stale.map(\.id)] as [String: Any] },
+            "batch": m.batchState.map { s -> [String: Any] in ["running": m.batchRunning, "summary": s["summary"] ?? [:], "next": s["next"] ?? NSNull(),
+                                                                   "items": ((s["batch"] as? [String: Any])?["items"]) ?? [], "paused": ((s["batch"] as? [String: Any])?["paused"]) ?? NSNull()] } ?? NSNull(),
             "cachedAt": Date().timeIntervalSince1970,
             "screenCaptureAllowed": Self.screenCaptureAllowed, "lastSnapshotPath": lastSnapshotPath,
             "overlays": [(m.showEnvironment, "环境检查页"), (m.exportFor != nil, "出包页")].filter { $0.0 }.map { $0.1 },

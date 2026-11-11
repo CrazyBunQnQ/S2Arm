@@ -46,6 +46,11 @@ void s2a_thread_dump(void) { g_ndump++; }          // 桩：看门经 dlsym 取�
 static _Atomic int g_dev = 1;   // ⑧ 开发设施开关桩（os.c s2a_dev_on）：缺省 1 = 开发包，原有 ④ ⑦ 照旧
 int s2a_dev_on(void) { return atomic_load(&g_dev); }
 int s2a_guest_frozen(void) { return g_fz; }
+// ④b 停帧现场「外因四态」的桩（os.c 的三个导出 + 上面 thread.c 的冻结）：缺符号时看门记 -1，这里都要有
+static _Atomic int g_host_focused = 1, g_focus_suspend = 1, g_host_sleeping;
+int s2a_host_focused(void) { return atomic_load(&g_host_focused); }
+int s2a_focus_suspend(void) { return atomic_load(&g_focus_suspend); }
+int s2a_host_sleeping(void) { return atomic_load(&g_host_sleeping); }
 static _Atomic int g_nhost;
 int s2a_dump_threads(const char *why) { (void)why; g_nhost++; return 0; }   // 桩：宿主线程栈
 static int capture(void (*fn)(void), char *out, size_t n) {
@@ -143,6 +148,34 @@ int main(void) {
                    k == 3 ? rb[0] : -1, k == 3 ? rb[1] : -1, k == 3 ? rb[2] : -1);
             bad += !ok;
         } else { printf("✗ ⑦b 起不了子进程（fork/pipe 失败）\n"); bad++; }
+    }
+    {   // ④b 停帧现场带「外因四态」：宿主焦点 / 失焦暂停 / 宿主睡眠 / 客机冻结。期望值按桩手写：第 1 份现场焦点=0（玩家切走），
+        //    同一进程里把桩改成 1 再停一次，第 2 份现场必须跟着变（钉住「每份现场现读、不是起线程时缓存」）。
+        //    看门线程每进程只起一次（g_stall_started），所以在父进程首帧上屏之前 fork 出来跑，日志走管道由父进程按子串判
+        int pfd[2]; pid_t pid = -1;
+        if (!pipe(pfd)) {
+            pid = fork();
+            if (pid == 0) {
+                close(pfd[0]); g_s2a_logfd = pfd[1];
+                setenv("S2A_STALL_DUMP_S", "1", 1);
+                atomic_store(&g_host_focused, 0); atomic_store(&g_focus_suspend, 1); atomic_store(&g_host_sleeping, 0); atomic_store(&g_fz, 0);
+                s2a_frame_presented(); usleep(1600000);   // lim=4 格（1 秒）打第 1 份现场
+                atomic_store(&g_host_focused, 1);
+                s2a_frame_presented(); usleep(1600000);   // 一帧后重新武装，改桩后再打第 2 份
+                _exit(0);
+            }
+            close(pid > 0 ? pfd[1] : pfd[0]);
+        }
+        if (pid > 0) {
+            char o[8192]; size_t k = 0; ssize_t r;
+            while (k < sizeof o - 1 && (r = read(pfd[0], o + k, sizeof o - 1 - k)) > 0) k += (size_t)r;
+            o[k] = 0; close(pfd[0]);
+            int st = 0; waitpid(pid, &st, 0);
+            int ok1 = strstr(o, "外因状态 宿主焦点=0 失焦暂停=1 宿主睡眠=0 客机冻结=0") != NULL;
+            int ok2 = strstr(o, "外因状态 宿主焦点=1 失焦暂停=1 宿主睡眠=0 客机冻结=0") != NULL;
+            printf("%s ④b 停帧现场外因四态：第 1 份 焦点=0 %s、第 2 份 焦点=1 %s（期望都有）\n", ok1 && ok2 ? "✓" : "✗", ok1 ? "有" : "无", ok2 ? "有" : "无");
+            bad += !(ok1 && ok2);
+        } else { printf("✗ ④b 起不了子进程（fork/pipe 失败）\n"); bad++; }
     }
     setenv("S2A_STALL_DUMP_S", "1", 1);   // 首帧前设：看门在首帧起线程时读阈值
     for (int i = 0; i < 3; i++) s2a_frame_presented();

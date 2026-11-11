@@ -966,7 +966,7 @@ class Profiles(unittest.TestCase):
         shutil.copyfile(REPO / "graphics/nvn/games/zero_skip.tsv", games / "zero_skip.tsv")   # 出库按程序号挑零源跳过事实写进 game.tsv（direct_lib.sh）
         pack = sandbox / "pack"; pack.mkdir()
         shutil.copyfile(REPO / "pack/srcs.sh", pack / "srcs.sh")
-        (pack / "jobs").mkdir(); shutil.copyfile(REPO / "pack/jobs/space_rule.py", pack / "jobs" / "space_rule.py")   # 出库开工前的空间复核（#265，direct_lib.sh 调）
+        (pack / "jobs").mkdir(); shutil.copyfile(REPO / "pack/jobs/space_rule.py", pack / "jobs" / "space_rule.py"); shutil.copyfile(REPO / "pack/jobs/library.py", pack / "jobs" / "library.py")   # 出库开工前的空间复核（#265，direct_lib.sh 调）
         consumer = sandbox / "graphics/tools/direct"; consumer.mkdir(parents=True)
         shutil.copyfile(REPO / "graphics/tools/direct/direct_lib.sh", consumer / "direct_lib.sh")
         shutil.copyfile(REPO / "graphics/tools/direct/extract.sh", consumer / "extract.sh")   # 10-25「抽着色器只做一次」：产物根没有 extract/ 时当场抽（真脚本，抽取器是下面的合成桩）

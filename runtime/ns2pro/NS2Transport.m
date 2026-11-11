@@ -400,7 +400,8 @@ static NS2Bridge *bridge;
     if (live) { linkShared[slot].failed = YES; refresh_locked(); }
     pthread_mutex_unlock(&stateMu);
     sessionFailed = YES; streamReady = NO; pendingCommand = nil; awaitingAck = NO; deadline = 0;
-    if (live) [bridge stopScanning];
+    // Joy-Con 失败不停扫描：重连记住的那只超时时，另一侧可能正在扫描窗口里等着被找到（Pro 同改前）
+    if (live && ns2_link_failure_stops_scan(kind)) [bridge stopScanning];
     if (!live) return;
     if (affected) emit_state((ns2_state){0});
     if (![self live]) return;
@@ -856,13 +857,14 @@ static NS2Bridge *bridge;
     if ([only->device.identifier isEqual:peripheral.identifier]) return NO;
     return (only->kind == NS2_KIND_JOYCON_L && found == NS2_KIND_JOYCON_R) || (only->kind == NS2_KIND_JOYCON_R && found == NS2_KIND_JOYCON_L);
 }
-// 能否（继续）扫描：没有链路，或只有一只已就绪的 Joy-Con 缺另一侧。
+// 能否（继续）扫描：没有链路，或只有一只 Joy-Con（已就绪或还在连）缺另一侧。
+//   还在连也要扫：重连记住的那只时它可能没开机（直连要等 30 秒才超时），这段时间另一侧照样能被找到；accepts 只收缺的那一侧
 - (BOOL)wantsAnotherDevice {
     NS2Link *a = links[0], *b = links[1];
     if (!a && !b) return YES;
     if (a && b) return NO;
     NS2Link *only = a ?: b;
-    return is_joycon(only->kind) && only->streamReady && !only->sessionFailed;
+    return ns2_scan_wants_other_side(only->kind, only->streamReady, only->sessionFailed);
 }
 // 对外状态：没有其他在用链路时原样转发（Pro / 单只 / 两只都还没就绪，与改前同一条路径）。
 // 另一只 Joy-Con 正在出输入时，非 READY 状态只记日志——iOS 按钮与 Mac 连接进程见到非 READY 会把整个手柄当成断开。
@@ -941,7 +943,12 @@ static NS2Bridge *bridge;
             [self connectPeripheral:known name:known.name RSSI:nil kind:sideKind]; any = YES;
             if (self != bridge) return;
         }
-        if (any) return;
+        // 只记得一只（或两只里只取回一只）：直连它的同时扫描另一侧。只直连不扫描时，记住的那只没开机就要等 30 秒超时，
+        //   而且失败后不转扫描，另一侧（如只开了右只）永远找不到（11-11 实机：记着左只，右只怎么按都连不上）
+        if (any) {
+            if (![self wantsAnotherDevice]) return;
+            LOG("NS2 Joy-Con 2：直连记住的一只，同时扫描另一侧 %u 秒", (unsigned)NS2_SCAN_SECONDS);
+        }
     }
     scanRequested = YES;
     [self scan];
@@ -1096,6 +1103,15 @@ static NS2Bridge *bridge;
     // Never match names heuristically; an explicitly advertised model-specific rumble UUID is also identity evidence.
     for (CBUUID *uuid in advertisement[CBAdvertisementDataServiceUUIDsKey]) if (found == NS2_KIND_NONE)
         found = uuid_is(uuid, vibrationUUID) ? NS2_KIND_PRO : uuid_is(uuid, joyconLeftVibrationUUID) ? NS2_KIND_JOYCON_L : uuid_is(uuid, joyconRightVibrationUUID) ? NS2_KIND_JOYCON_R : NS2_KIND_NONE;
+    // 认得出型号的广播每台记一次：实机报「另一只连不上」时，看得出它有没有被扫到、为什么没接（accepts）
+    if (found != NS2_KIND_NONE) {
+        static NSMutableSet<NSUUID *> *seen;
+        if (!seen) seen = [NSMutableSet new];
+        if (![seen containsObject:peripheral.identifier]) {
+            [seen addObject:peripheral.identifier];
+            LOG("NS2 扫到手柄广播 id=%s kind=%d RSSI=%d accepts=%d", peripheral.identifier.UUIDString.UTF8String, found, rssi.intValue, [self accepts:found peripheral:peripheral]);
+        }
+    }
     if (![self accepts:found peripheral:peripheral]) return;   // 已有一只 Joy-Con 时只接另一侧
     NSNumber *connectable = advertisement[CBAdvertisementDataIsConnectable];
     if (connectable && !connectable.boolValue) return;

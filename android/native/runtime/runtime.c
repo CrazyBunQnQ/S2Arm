@@ -1,5 +1,7 @@
 #include "runtime.h"
 #include "host_android.h"
+#include "../dguard_android.h"
+#include "../docs_android.h"
 #include "../direct/graphics.h"
 #include "../direct/json.h"
 #include "../direct/selection.h"
@@ -29,6 +31,7 @@ void s2a_det_init(void);
 void load_modules(const char *, const char **, int);
 void load_modules_from_source(const struct s2a_loader_source *, const char **, int);
 void s2a_caps_apply(const char *);   // runtime/src/caps.c
+void s2a_fps_start(const char *);    // runtime/src/fps.c
 unsigned s2a_unresolved_count(void);
 uint64_t s2a_mem_init(const char *);
 void *guest_sym(const char *);
@@ -121,6 +124,15 @@ static int run_common(const struct s2a_android_runtime_request *r,
         snprintf(reason, sizeof reason, "Android session log unavailable (errno=%d)", log_error);
         return failed(S2A_RUNTIME_LOG, 0, reason);
     }
+    // 共用文档根（runtime/include/s2a_docs.h）：iOS / Mac 由启动上下文把 S2A_DOCS 写进进程环境，
+    //   安卓没有那一步——绑到本局 state 目录（应用私有、按款、可写），dguard 的 wire/direct_guard、
+    //   patch 的 S2A/patches 等 s2a_docs_path 消费者在这之后才跑。绑不上只退化成写不进文档根
+    //   （与此前的行为相同），不拦起局。
+    {
+        int drc = s2a_android_docs_bind(r->services.state_dir);
+        if (drc)
+            fprintf(stderr, "[s2a] 【红】S2A_DOCS bind failed (errno=%d): docs-root records (direct_guard, patches) unavailable\n", drc);
+    }
 #endif
     if (!s2a_window_ok()) return failed(S2A_RUNTIME_WINDOW, 0, "native guest window unavailable");
     // selfcheck 核对仍未裁剪的真实64GiB窗口和已注册HostApi内存事实；必须在loader/NPDM之前。
@@ -182,6 +194,12 @@ static int run_common(const struct s2a_android_runtime_request *r,
             services_v2->graphics = &frozen->table;
             services_v2->graphics_mode = 1;
             frozen_direct = 1;
+            // 直连安全网（共用 dguard.c，接口 dguard_android.h）：NVN 直连已提交、客体代码
+            // 还没跑——武装点与 iOS host_main 的 begin/arm 时机一致。满限 + 无人值守收局，
+            // 有人局提示后照常武装继续；debug.s2a.dguard=0 整局不武装（launch 里判）。
+            int dg = s2a_android_dguard_launch(r->program_id, r->services.game_data_dir, frozen->table.version);
+            if (dg) return failed(S2A_RUNTIME_DIRECT, dg,
+                "direct safety guard stopped unattended launch (consecutive failures at limit)");
         } else {
             services_v2->graphics = NULL;
             services_v2->graphics_mode = 0;
@@ -235,6 +253,10 @@ static int run_common(const struct s2a_android_runtime_request *r,
     // prepared 只证资源、真实dispatcher安装和VM写入通道，最终同线程信号探针仍在SDK入口执行。
     if (s2a_android_guest_writers_init() || s2a_track_runtime_prepare() || s2a_android_tracking_vm_prepare())
         return failed(S2A_RUNTIME_TRACKING, 0, "native tracking preparation failed");
+    // 60 帧表（#48 D2）：改写器按包里 fps.tsv 打进的读槽指令要 fps.c 往键页槽里写值，没人写游戏就读到 0。
+    //   表与 s2a_caps.tsv 同在游戏数据根（tools/make_pack.py）；开关 S2A_FPS60 已由上面的能力清单 / 启动环境给定。
+    //   放在 VM 写入通道就绪之后：写入线程改游戏数据走 checked 写（fps_provider.c），要 writers / 跟踪已准备好。
+    s2a_fps_start(r->services.game_data_dir);
     // 在执行任何 SDK 指令前解析全部必需入口。DT_INIT 仍由共享 loader 按逆依赖顺序遍历。
     static const char *const sdk[] = {"_init_libc0", "nnosInitialize", "_init_libc1",
         "nninitInitializeSdkModule", "nninitStartup", "_init_libc2", "nnMain"};

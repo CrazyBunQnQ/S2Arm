@@ -414,6 +414,88 @@ static void test_active_pad(void) {
     expect(active_pad(@[fake_controller(nil)]) == nil && active_pad(@[]) == nil, "no extended gamepad: none");
 }
 
+// A2 事件驱动输入：Mac 导出 s2a_vpad_read_ex，sample_input 同步写 runtime/src/pad.c，InputPump 才能从 Sleep(16)
+//   换成 s2a_pad_wait。期望手算：keyDown 后 read_ex 立即看到 A 位并带 host 时间戳；keyUp 在 50ms deadline 前唤醒等待线程
+//   （旧实现没有 pad 通知，等待只能跑满 deadline）。
+static void test_event_input(void) {
+    typedef void (*read_ex_fn)(s2a_pad_snapshot *);
+    read_ex_fn read_ex = (read_ex_fn)dlsym(RTLD_DEFAULT, "s2a_vpad_read_ex");
+    expect(read_ex != NULL, "Mac exports s2a_vpad_read_ex");
+    config = default_config(); reset_input(); focused = YES;
+    s2a_pad_set_active(1);
+    S2AMetalView *view = [S2AMetalView new];
+    [view keyDown:key_event(NSEventTypeKeyDown, 14, NO)];   // 缺省映射 E = Switch A（位 0）
+    s2a_pad_snapshot down; read_ex(&down);
+    expect((down.buttons & 1u) != 0 && down.host_timestamp_us != 0, "event snapshot carries the key and its host timestamp");
+    s2a_pad_record_commit(&down);
+
+    uint64_t observed;
+    { s2a_pad_snapshot snap; read_ex(&snap); observed = snap.notification_seq; }
+    __block uint64_t waited = 0;
+    dispatch_semaphore_t started = dispatch_semaphore_create(0), done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        dispatch_semaphore_wait(started, DISPATCH_TIME_FOREVER);
+        uint64_t t0 = s2a_pad_now_us();
+        s2a_pad_wait(observed, t0 + 50000);
+        waited = s2a_pad_now_us() - t0;
+        dispatch_semaphore_signal(done);
+    });
+    dispatch_semaphore_signal(started);
+    [NSThread sleepForTimeInterval:0.02];   // 让等待线程先进入条件变量；即使没进，序号变化也会让它立即返回
+    [view keyUp:key_event(NSEventTypeKeyUp, 14, NO)];
+    expect(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 1000000000)) == 0, "pad wait completes after key up");
+    expect(waited < 50000, "key up wakes pad wait before the deadline");
+
+    s2a_pad_latency latency; s2a_pad_get_latency(&latency, 1);
+    expect(latency.samples >= 1 && latency.host_max_us < 50000, "committed event latency is recorded");
+
+    // 负对照（维护者要求）：事件驱动只发变化；长按 / 摇杆持续推时，没有新事件的那几拍 read_ex 仍必须返回完整的按住状态。
+    [keys addObject:@14]; [keys addObject:@13]; sample_input();   // E = A，W = LS_UP
+    uint64_t held_seq;
+    { s2a_pad_snapshot snap; read_ex(&snap); held_seq = snap.notification_seq; }
+    expect(s2a_pad_wait(held_seq, s2a_pad_now_us() + 20000) == 0, "idle wait times out without new events");
+    for (int i = 0; i < 5; i++) {
+        s2a_pad_snapshot held; read_ex(&held);
+        expect((held.buttons & 1u) != 0 && held.axes[1] == 32767, "held key and stick persist across idle reads");
+    }
+    [keys removeObject:@14]; [keys removeObject:@13]; sample_input();
+
+    // 鼠标位移仍由 HID 读取侧消费一次（旧 s2a_vpad_read 与 read_ex 共用）
+    config = @{@"keyboard": @{}, @"mouse": @{}, @"gamepad": @{}, @"axes": @{}, @"deadzone": @0.15,
+               @"mouseOptions": @{@"mode": @"camera", @"sensitivityX": @1, @"sensitivityY": @1}};
+    apply_mouse_options(); mouse_captured = YES; focused = YES;
+    TestMotion *motion = [TestMotion new]; motion.deltaX = 2;
+    S2AMetalView *motionView = [S2AMetalView new];
+    [motionView mouseMoved:(NSEvent *)motion];
+    s2a_pad_snapshot moved; read_ex(&moved);
+    expect(moved.axes[2] == 3000, "read_ex applies pending mouse delta once");
+    read_ex(&moved);
+    expect(moved.axes[2] == 0, "read_ex consumes the mouse delta");
+    mouse_captured = NO;
+    config = default_config(); focused = YES; s2a_pad_set_active(0); reset_input();
+    puts("Mac input: event-driven snapshot, wait wake, idle-hold persistence and latency recording passed");
+}
+
+// 维护方评审 11-09：手柄断开时前端切到 TOUCH 源，但 pad.c 里 SYSTEM 源一直 connected，selected() 仍选 SYSTEM
+//   并丢掉 TOUCH 更新，断开瞬间按住的键卡住、键盘失灵。期望手算：SYSTEM 按 A（0x1）→ 断开后键盘按 B（0x2）→
+//   快照 source = TOUCH、buttons = 0x2。负对照：去掉 publish_pad_state 里的 SYSTEM 断开 → 快照仍是 SYSTEM / 0x1。
+static void test_pad_disconnect(void) {
+    typedef void (*read_ex_fn)(s2a_pad_snapshot *);
+    read_ex_fn read_ex = (read_ex_fn)dlsym(RTLD_DEFAULT, "s2a_vpad_read_ex");
+    expect(read_ex != NULL, "Mac exports s2a_vpad_read_ex");
+    int32_t sticks[4] = {0};
+    focused = YES; s2a_pad_set_active(0); s2a_pad_set_active(1);
+    publish_pad_state(1, 1u, sticks);
+    s2a_pad_snapshot snap; read_ex(&snap);
+    expect(snap.source == S2A_PAD_SYSTEM && snap.buttons == 1u, "gamepad press is selected on SYSTEM source");
+    publish_pad_state(0, 1u << 1, sticks);
+    read_ex(&snap);
+    expect(snap.source == S2A_PAD_TOUCH && snap.buttons == (1u << 1), "keyboard still works after gamepad disconnect");
+    expect(!s2a_pad_has_controller(), "disconnected gamepad is no longer the selected controller");
+    s2a_pad_set_active(0); reset_input();
+    puts("Mac pad: disconnect returns to touch source and keeps keyboard input passed");
+}
+
 // 手柄事件回调（A2）：handlerQueue 必须切到主队列（与 AppKit 事件串行），回调直接发布整份当前状态；
 //   没有新事件时 120Hz 定时器仍是回退采样，长按不会因为「只发变化」而丢。
 static void test_pad_handler_install(void) {
@@ -643,6 +725,14 @@ int main(int argc, const char **argv) {
     int relayListener = socket(AF_UNIX, SOCK_STREAM, 0);
     expect(bind(relayListener, (struct sockaddr *)&relayAddress, sizeof relayAddress) == 0, "motion relay bind");
     expect(listen(relayListener, 1) == 0, "motion relay listen");
+    // 开局后才连手柄（11-11 实机：先开游戏、再在 S2Arm 连 Joy-Con 2，游戏一直收不到输入）：通道文件不在不连、出现后连；已接上 / 非 IDLE 不重复连
+    char missingRelay[96];
+    snprintf(missingRelay, sizeof missingRelay, "/tmp/s2arm-missing-%d.sock", getpid());
+    expect(!s2a_mac_ns2_relay_due(NS2_STATUS_IDLE, missingRelay), "relay not due before the S2Arm connection program creates the socket");
+    expect(s2a_mac_ns2_relay_due(NS2_STATUS_IDLE, relayPath), "relay due once the socket exists and the game never connected");
+    expect(!s2a_mac_ns2_relay_due(NS2_STATUS_READY, relayPath) && !s2a_mac_ns2_relay_due(NS2_STATUS_CONNECTING, relayPath),
+           "relay not reconnected while connected or connecting");
+    expect(!s2a_mac_ns2_relay_due(NS2_STATUS_IDLE, NULL) && !s2a_mac_ns2_relay_due(NS2_STATUS_IDLE, ""), "no relay path: keyboard-only launch never connects");
     setenv("S2A_NS2_SOCKET", relayPath, 1);
     s2a_mac_ns2_focus(1);
     expect(s2a_mac_ns2_connect(), "Switch 2 Pro motion relay connects");
@@ -705,6 +795,8 @@ int main(int argc, const char **argv) {
         gfx_mode = S2A_GFX_GENERIC;
         config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
         test_key_repeat();
+        test_event_input();
+        test_pad_disconnect();
         test_pad_handler_install();
         test_save_atomic_warning();
         test_lan_warning();

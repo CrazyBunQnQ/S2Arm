@@ -69,15 +69,16 @@ public final class SettingsProvider {
     public var aiControl: Bool { lock.withLock { ai } }
 
     public func setAIControl(_ on: Bool) throws {
-        lock.lock(); ai = on; lock.unlock()
-        do { try write() } catch { throw JobClientError("「允许 AI 操作」的开关没能写进磁盘（\(error.localizedDescription)）。") }
+        let before = lock.withLock { () -> Bool in let b = ai; ai = on; return b }
+        do { try write() } catch { lock.withLock { ai = before }; throw JobClientError("「允许 AI 操作」的开关没能写进磁盘（\(error.localizedDescription)）。") }
     }
 
     public var cloudSavesFolder: String? { lock.withLock { cloud } }
 
     public func setCloudSavesFolder(_ path: String?) throws {
-        lock.lock(); cloud = path; lock.unlock()
-        do { try write() } catch { throw JobClientError("iCloud 存档文件夹没能写进磁盘（\(error.localizedDescription)）。") }
+        // 写盘失败把内存改回原值（审计 P2-273：原先内存已是新路径、磁盘还是旧的，之后的同步按没存下的路径走、下次启动又回到旧的）
+        let before = lock.withLock { () -> String? in let b = cloud; cloud = path; return b }
+        do { try write() } catch { lock.withLock { cloud = before }; throw JobClientError("iCloud 存档文件夹没能写进磁盘（\(error.localizedDescription)）。") }
     }
 
     /// 出包页勾了哪些平台（平台 id，ExportPlatform.rawValue）。缺省一个都不勾（维护者 11-02）；新前端没存过就接着用旧启动器的勾选。
@@ -88,8 +89,8 @@ public final class SettingsProvider {
 
     /// 记住平台勾选（写本文件，不回写旧启动器的 preferences.json）。
     public func setExportTargets(_ ids: [String]) throws {
-        lock.lock(); targets = ids; lock.unlock()
-        do { try write() } catch { throw JobClientError("出包平台的勾选没能写进磁盘（\(error.localizedDescription)）。") }
+        let before = lock.withLock { () -> [String]? in let b = targets; targets = ids; return b }
+        do { try write() } catch { lock.withLock { targets = before }; throw JobClientError("出包平台的勾选没能写进磁盘（\(error.localizedDescription)）。") }
     }
 
     private func write() throws {

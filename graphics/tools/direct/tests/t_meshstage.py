@@ -94,8 +94,11 @@ ck('③ A：图元数在字 1348 高字节、索引字节从 5396 起', 'uint np
 z = A.split('[[mesh]] void main0_z(')
 ck('③ A：近平面换算只在 main0（GL -w），main0_z 不换', len(z) == 2 and 'v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);' in z[0] and 'fma(' not in z[1])
 ck('③ B：无任务读槽 29 的起始组号', 'constant uint* dm_first [[buffer(29)]]' in B and 'if (dm_lid == 0u) _35[0] = dm_first[0] + dm_tg;' in B and 'object_data' not in B)
-ck('③ B：逐图元属性 2 = 分量 4、按图元写', 'float4 p2 [[user(locn2)]];' in B and 'p.p2 = float4(as_type<float>(_35[b + 128u]), 0.0, 0.0, 1.0);' in B and 'metal::mesh<dm_vertex_t, dm_prim_t, 32, 32' in B)
-ck('③ B：块地址 4 + (n/32)·160、图元数字 164、索引从 660', 'uint b = 4u + (n / 32u) * 160u + n % 32u;' in B and 'min(_35[164] >> 24, 32u)' in B and 'uint at = 660u + n;' in B)
+# 属性区按硬件排法（顶点块与图元块不交错，见 MeshStage.ToStage 注释：网格 192226654c410372 本体写顶点 (v >> 5) × 2432、图元 12160 + (p >> 5) × 384）：
+#   B 有 4 个顶点分量、1 个图元分量、32 顶点 / 32 图元 → 顶点块长 4 × 32 = 128 字，图元区从 1 块顶点之后起（4 + 128 = 132），块长 1 × 32 字、属性 2 是图元区第 0 个分量
+ck('③ B：逐图元属性 2 = 图元区分量 0、按图元写', 'float4 p2 [[user(locn2)]];' in B and 'p.p2 = float4(as_type<float>(_35[b + 0u]), 0.0, 0.0, 1.0);' in B and 'metal::mesh<dm_vertex_t, dm_prim_t, 32, 32' in B)
+ck('③ B：顶点块 4 + (n/32)·128、图元块 132 + (n/32)·32、图元数字 164、索引从 660', 'uint b = 4u + (n / 32u) * 128u + n % 32u;' in B and 'uint b = 132u + (n / 32u) * 32u + n % 32u;' in B
+   and 'min(_35[164] >> 24, 32u)' in B and 'uint at = 660u + n;' in B)
 ck('③ C：对象入口、载荷 800 字从字 804 拷出、网格组数 = 字 805 封顶 1024', '[[object]] void main0(' in C and 'struct dm_payload_t { uint w[800]; };' in C
    and 'dm_payload.w[i] = _35[804u + i];' in C and 'dm_grid.set_threadgroups_per_grid(uint3(min(_35[805], 1024u), 1u, 1u));' in C and 'constant uint* dm_first [[buffer(29)]]' in C
    and '_35[0] = dm_first[0] + dm_tg;' in C)

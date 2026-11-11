@@ -1,0 +1,276 @@
+{
+    "$schema": "https://schema.khronos.org/vulkan/profiles-0.8.2-latest.json#",
+    "capabilities": {
+        "no_bc": {
+            "features": {
+                "VkPhysicalDeviceFeatures": {
+                    "textureCompressionBC": false
+                }
+            },
+            "formats": {
+                "VK_FORMAT_BC1_RGB_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC1_RGB_SRGB_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC1_RGBA_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC1_RGBA_SRGB_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC2_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC2_SRGB_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC3_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC3_SRGB_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC4_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC4_SNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC5_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC5_SNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC6H_UFLOAT_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC6H_SFLOAT_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC7_UNORM_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_BC7_SRGB_BLOCK": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                }
+            }
+        },
+        "no_d24": {
+            "formats": {
+                "VK_FORMAT_D24_UNORM_S8_UINT": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_X8_D24_UNORM_PACK32": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                }
+            }
+        },
+        "no_vertex_stores": {
+            "features": {
+                "VkPhysicalDeviceFeatures": {
+                    "vertexPipelineStoresAndAtomics": false
+                }
+            }
+        },
+        "no_dual_src_blend": {
+            "features": {
+                "VkPhysicalDeviceFeatures": {
+                    "dualSrcBlend": false
+                }
+            }
+        },
+        "no_depth_clamp": {
+            "features": {
+                "VkPhysicalDeviceFeatures": {
+                    "depthClamp": false
+                }
+            }
+        },
+        "unchanged": {}
+    },
+    "profiles": {
+        "VP_S2A_SIM_no_bc": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无 BC 贴图",
+            "description": "藏掉 textureCompressionBC 与全部 BC 格式（多数 Mali / Adreno 6xx–7xx 驱动）。期望：契约绿，BC 全走计算着色器解码。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_bc"
+            ]
+        },
+        "VP_S2A_SIM_no_d24": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无 D24 深度附件",
+            "description": "藏掉 D24_UNORM_S8_UINT 与 X8_D24_UNORM_PACK32（三星 Xclipse，#398）。期望：契约绿，NVN D24 换 D32 存储（#422），0 条 validation。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_d24"
+            ]
+        },
+        "VP_S2A_SIM_no_vertex_stores": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无顶点阶段存储写",
+            "description": "藏掉 vertexPipelineStoresAndAtomics（Mali 类）。期望：发行宏下仍能建设备，契约绿。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_vertex_stores"
+            ]
+        },
+        "VP_S2A_SIM_no_dual_src_blend": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无双源混合",
+            "description": "藏掉 dualSrcBlend。期望：用到双源混合因子的管线按规定报 UNSUPPORTED（C69），不崩。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_dual_src_blend"
+            ]
+        },
+        "VP_S2A_SIM_no_depth_clamp": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "负对照：无 depthClamp",
+            "description": "藏掉硬门槛 depthClamp。期望：建设备被拒，日志有 required feature missing: depthClamp。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_depth_clamp"
+            ]
+        },
+        "VP_S2A_SIM_no_calibrated_timestamps": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无校准时间戳",
+            "description": "能力不变，由 sim_tiers.sh 用 exclude_device_extensions 去掉 VK_KHR/EXT_calibrated_timestamps。期望：契约绿，计时走完成点兜底（calibrated_timestamps=0）。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-10",
+                    "author": "S2Arm",
+                    "comment": "首版（#429）：只按 Vulkan 规范特性名 / 格式名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "unchanged"
+            ]
+        }
+    }
+}

@@ -302,6 +302,72 @@ namespace S2A.Services.Tests
 
             Check("hwopus 用例覆盖三种编码模式（按 TOC 计包）", "SILK、Hybrid、CELT 都有", modes[0] > 0 && modes[1] > 0 && modes[2] > 0 ? "SILK、Hybrid、CELT 都有" : $"SILK {modes[0]} / Hybrid {modes[1]} / CELT {modes[2]} 包");
             Console.Error.WriteLine($"hwopus 逐样本比对合计：{cases.Length} 例 {allSamples} 样本、不一致 {allBad}；模式 SILK {modes[0]} / Hybrid {modes[1]} / CELT {modes[2]} 包");
+
+            TestHwOpusLimit(hwo, cases[0]);
+            TestHwOpusCreateFailure(hwo);
+        }
+
+        // 审计 P2-276：libopus 拒绝的参数（多流声道映射指到不存在的流）要回参数错误，名额还回去、工作缓冲句柄关掉；不能让异常冲出服务分发。
+        //   期望手算：OpusBadArg = 模块 111 | 描述 130 << 9 = 0x1046F
+        private static void TestHwOpusCreateFailure(uint hwo)
+        {
+            int before = Ryujinx.Horizon.Sdk.Codec.Detail.HardwareOpusDecoder.LiveCount, copies = NativeSyscall.CopyCount;
+            int owb = 0x40000;
+            uint tm = FakeNative.TmemCreate((ulong)FakeNative.Alloc(owb), (ulong)owb, 0);
+            byte* prm = FakeNative.Alloc(0x110);
+            new Span<byte>(prm, 0x110).Clear();
+            *(int*)prm = 48000; *(int*)(prm + 4) = 2; *(int*)(prm + 8) = 1; *(int*)(prm + 12) = 1;
+            prm[16] = 0; prm[17] = 5;   // 第二个声道映射到第 5 路：流数 + 立体声流数只有 2
+            Msg om = Msg.Cmif(2, BitConverter.GetBytes(owb));
+            om.X.Add(((ulong)prm, 0x110));
+            om.Copy.Add(tm);
+            Reply r = Call(hwo, om);
+            // 服务端拿到的是复制记号（NativeSyscall.CopyIn），关的是记号；游戏自己的工作缓冲句柄照旧开着（同真机：复制句柄互不影响），测完由这里关
+            bool closed = WaitFor(() => NativeSyscall.CopyCount == copies, 5_000);
+            FakeNative.HandleClose(tm);
+            Check("hwopus libopus 拒绝的参数：结果 / 会话 / 服务端的工作缓冲句柄 / 存活名额",
+                $"0x1046F / 不给会话 / 已关 / {before}",
+                $"0x{r.Result:X} / {(r.Move.Count == 0 ? "不给会话" : $"给了 {r.Move.Count} 个会话")} / {(closed ? "已关" : $"还开着（复制记号 {NativeSyscall.CopyCount}，调用前 {copies}）")} / {Ryujinx.Horizon.Sdk.Codec.Detail.HardwareOpusDecoder.LiveCount}");
+        }
+
+        // 同时存活的解码器上限（0100A00019DE0000 存档后 Break 2010-0011）：游戏 SDK 客户端只有 16 个解码器对象的位置，开第 17 个就中止；
+        //   真机服务端在这之前回 0x3026F（codec 111-385），SDK 转成「资源不足」交给游戏。期望值来自 SDK：InitializeHardwareOpusDecoder 对 (结果 & 0x3fffff) == 0x3026F 走温和分支
+        private static void TestHwOpusLimit(uint hwo, OpusCase c)
+        {
+            var live = () => Ryujinx.Horizon.Sdk.Codec.Detail.HardwareOpusDecoder.LiveCount;
+            WaitFor(() => live() == 0, 5_000);   // 上面逐例都已关掉，等服务端处理完关会话
+            int before = live();
+            var held = new List<uint>();
+            int okCount = 0;
+
+            for (int i = 0; i < 16; i++)
+            {
+                uint d = OpusOpen(hwo, c);
+                if (d != 0) { held.Add(d); okCount++; }
+            }
+
+            // 第 17 个：要回 0x3026F、不给会话
+            int owb = 0x40000;
+            uint tm = FakeNative.TmemCreate((ulong)FakeNative.Alloc(owb), (ulong)owb, 0);
+            byte[] a = new byte[12];
+            BitConverter.TryWriteBytes(a.AsSpan(0), c.Rate); BitConverter.TryWriteBytes(a.AsSpan(4), c.Ch); BitConverter.TryWriteBytes(a.AsSpan(8), owb);
+            Msg om = Msg.Cmif(0, a);
+            om.Copy.Add(tm);
+            Reply r17 = Call(hwo, om);
+
+            // 关掉一个，名额回来后能再开
+            FakeNative.HandleClose(held[0]);
+            held.RemoveAt(0);
+            WaitFor(() => live() == 15, 5_000);
+            uint again = OpusOpen(hwo, c);
+            if (again != 0) held.Add(again);
+
+            foreach (uint d in held) FakeNative.HandleClose(d);
+            WaitFor(() => live() == 0, 5_000);
+
+            Check("hwopus 同时存活上限：开 16 个 / 第 17 个 / 关一个后再开 / 全关后存活",
+                "16 个成功（开始前存活 0） / 0x3026F 不给会话 / 成功 / 0",
+                $"{okCount} 个成功（开始前存活 {before}） / 0x{r17.Result:X} {(r17.Move.Count == 0 ? "不给会话" : $"给了 {r17.Move.Count} 个会话")} / {(again != 0 ? "成功" : "失败")} / {live()}");
         }
     }
 }

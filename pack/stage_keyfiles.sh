@@ -8,7 +8,8 @@ stage_files_key() {
   f=$(LC_ALL=C awk -F'\t' '$1 == "入" { print $2 }' "$t") || return 1
   [ -n "$f" ] || { echo "【红】$t 里没有「入」的文件" >&2; return 1; }
   # shellcheck disable=SC2086
-  out=$(git -C "$r" ls-tree HEAD -- $f) || { echo "【红】取不到 $st 输入文件的对象号（git ls-tree）" >&2; return 1; }
+  # 账本调用不吃工具链 env：上游解析后 DEVELOPER_DIR 指构建用的 Xcode，坏/假值会让 /usr/bin/git 垫片 xcrun 报红（stage_direct_test 夹具曾给 mktemp 目录复现）
+  out=$(env -u DEVELOPER_DIR git -C "$r" ls-tree HEAD -- $f) || { echo "【红】取不到 $st 输入文件的对象号（git ls-tree）" >&2; return 1; }
   [ "$(printf '%s\n' "$out" | grep -c .)" = "$(printf '%s\n' "$f" | grep -c .)" ] \
     || { echo "【红】$t 里有文件不在 HEAD：$(printf '%s\n' "$f" | while read -r p; do grep -qF "	$p" < <(printf '%s\n' "$out") || printf '%s ' "$p"; done)（改名 / 删除要同笔改本表）" >&2; return 1; }
   printf '%s\n' "$out" | awk '{ print $3, $4 }' | shasum -a 256 | cut -c1-16

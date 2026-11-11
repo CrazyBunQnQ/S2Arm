@@ -1,4 +1,5 @@
 """游戏库布局（pack/jobs/layout.py）单测：命名规则、旧布局迁移、中断续做。期望值按设计文档的规则手写，不跑被测实现推导。"""
+import errno
 import hashlib
 import json
 import os
@@ -241,6 +242,25 @@ class LocationTests(JobCase):
         os.rename(self.disk, self.disk.with_name("拔掉了"))
         self.assertEqual(layout.state(self.fresh(), B), ("offline", self.disk))
 
+    def test_picking_another_location_when_the_old_one_is_offline(self):
+        # #453：这款记在一个没连上的位置（文件夹没了），而且在当前库清单里（所以是 offline，#432 那条管不到）；玩家在出包页另选了位置。
+        #   期望（手写）：在新选的位置建这款、黄字说明；还是选那个没连上的位置就照旧报「没连上」
+        import library
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=A, name="Alpha")]))
+        layout.game_dir(self.c, A, location=self.disk)
+        os.rename(self.disk, self.disk.with_name("拔掉了"))
+        self.assertEqual(layout.state(self.fresh(), A), ("offline", self.disk))
+        self.c.r["location"] = str(self.disk)
+        with self.assertRaisesRegex(Exception, "没连上"):
+            library.apply_location(self.c, dict(id=A))
+        other = self.root / "新位置"
+        self.c.r["location"] = str(other)
+        library.apply_location(self.c, dict(id=A))
+        self.assertEqual(layout.state(self.fresh(), A), ("ok", other / "games" / "Alpha"))
+        warn = [d for d in self.c.job["diagnostics"] if d.get("severity") == "warning"]
+        self.assertTrue(warn and "没连上" in warn[-1]["summary"], self.c.job["diagnostics"])
+        self.assertTrue((self.disk.with_name("拔掉了") / "games" / "Alpha").is_dir())   # 原位置上的文件不动
+
     def test_renamed_folder_offline_location_and_missing_folder(self):
         d = layout.game_dir(self.c, A, location=self.disk)
         os.rename(d, d.with_name("改过的名字"))
@@ -459,6 +479,22 @@ class StoreMetaTests(JobCase):
         self.assertEqual(library.store_meta(self.fresh()), 0)                          # 7 天内查过：不再查
         self.assertEqual(self.calls, [])
 
+    def test_library_on_other_volume(self):
+        # 游戏库在外置盘、临时目录在私有目录：跨卷时 os.replace 报 EXDEV（本机外置盘游戏库实测：五款一张横图都没进库、storeChecked 也没记上）
+        import library
+        L = self.c.library
+        real = os.replace
+
+        def cross(src, dst):
+            if Path(src).parent != Path(dst).parent:
+                raise OSError(errno.EXDEV, "Cross-device link")
+            return real(src, dst)
+        with patch("library.os.replace", cross):
+            self.assertEqual(library.store_meta(self.fresh(), {B}), 1)
+        self.assertEqual((L / "games" / B / "banner.jpg").read_bytes(), b"JPG-" + B.encode())
+        self.assertFalse((L / "games" / B / ".banner.jpg.part").exists())
+        self.assertTrue(self.catalog()[B].get("storeChecked"))
+
     def test_import_ids_only_and_switch_off(self):
         import library
         self.assertEqual(library.store_meta(self.fresh(), {B}), 1)                     # 导入刚加的款：只查它
@@ -523,7 +559,7 @@ class StoreMetaTests(JobCase):
         popen = []
         with patch("subprocess.Popen", lambda args, **kw: popen.append(args)):
             self.assertTrue(library.store_meta_background(self.fresh(), {B}))
-            self.assertEqual(popen[-1][3:5], [str(Path(library.__file__).with_name("store_meta_bg.py")), str(self.c.private)])
+            self.assertEqual(popen[-1][1:7], ["-I", "-X", "utf8", "-B", str(Path(library.__file__).with_name("store_meta_bg.py")), str(self.c.private)])   # -X utf8：-I 下 PYTHONUTF8 不生效（#514）
             self.assertEqual(popen[-1][-1], B)                                          # 只查导入刚加的款
             self.assertFalse(library.store_meta_background(self.fresh(), {A}))          # A 都有了：不起
             with patch.dict(os.environ, {"S2A_BANNER_FETCH": "0"}):

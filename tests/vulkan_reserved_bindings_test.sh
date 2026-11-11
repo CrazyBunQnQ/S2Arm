@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks | grep -q '^10\.'; then
     echo "缺少 .NET 10 SDK；未执行 Vulkan 保留绑定容量回归（不自动下载）" >&2
-    exit 2
+    exit 75   # 缺 .NET 10 SDK = 这支没跑（环境未就绪，审计 P1-158），不是代码红也不是通过
 fi
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT

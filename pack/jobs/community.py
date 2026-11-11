@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import os
 from pathlib import Path
 
@@ -310,4 +311,23 @@ def launch_env(c, gid):
         env["S2A_PAD_FACE"] = "position"  # 手柄按键对应：按 Switch 的按键位置（缺省按字母；宿主口径见主线线 fix/pad-xbox-1109）
     if s.get("motion") is False:
         env["S2A_MOTION"] = "0"           # 体感关：不开手柄六轴（macos/front_mac.m）
+    if s.get("diagRun") is True:
+        env.update(diag_run_env(c, gid))  # 诊断局（#438）：只管这一局，用掉就关
     return env
+
+
+DIAG_RUN_FRAMES = "3600,7200"   # 第 3600 / 7200 次出图（60 帧游戏约 1 / 2 分钟）：逐通道读数取的帧，同 iPhone（ios/settings.m s2a_ios_apply_diag_run）
+
+
+def diag_run_env(c, gid):
+    """诊断局的探针（#438，维护者定的变量与帧号，Mac 与 iPhone 同一组）：逐通道记录 [pass] 行走宿主 stderr → 本局 game.log；
+    出图与颜色目标 PNG 写这款文件夹的 diagrun/（导出诊断包时带上，library.diagnostics）。这些是重探针、会拖慢帧率：
+    读到一次就把 launch.json 里这项去掉，只管这一局"""
+    out = layout.path(c, gid, "diagrun")
+    shutil.rmtree(out, ignore_errors=True)   # 上一次诊断局的图不混进来
+    out.mkdir(parents=True, exist_ok=True)
+    data = load_launch(c, gid)
+    data["settings"].pop("diagRun", None)
+    atomic(launch_path(c, gid), data)
+    return {"DM_NVN_PASSDUMP": "3600-3601", "DM_NVN_TEXDUMP": f"{DIAG_RUN_FRAMES}:{out}/td_%d.png",
+            "DM_NVN_TEXSNAP": "0,4,8,12,16,20,24,28", "DM_NVN_SHOT": f"{DIAG_RUN_FRAMES}:{out}/shot_%d.png"}

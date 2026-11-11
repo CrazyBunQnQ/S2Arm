@@ -249,7 +249,7 @@ public sealed partial class EnvironmentWindow
         try
         {
             var result = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId,
-                "import", filePaths, cts.Token);
+                "import", filePaths, cts.Token, partialResults: true);
             DisplayJob(result);
             if (!result.Report.Succeeded)
             {
@@ -286,6 +286,22 @@ public sealed partial class EnvironmentWindow
                 }
             }
             pendingImportPaths = [];
+            // 批量出包（v0.2.4）：一次放进多款 → 列成清单连续出包，认不出的也列上、写原因
+            var ids = ImportOutcome.GameIds(result.Report.Result);
+            var failed = ImportOutcome.Failed(result.Report.Result);
+            if (ids.Count > 1) { importDialog = null; OpenBatch(ids, failed); return; }
+            if (failed.Count > 0)
+            {
+                // 逐来源模式下认不出的不让整个作业失败：一款都没进来且是「密钥版本不足」照旧引导换密钥；其余在弹窗里逐份说原因
+                if (ids.Count == 0 && ImportFailureRoute.For(failed[0].Code, catalog?.KeysReady == true) == ImportFailureRoute.ReplaceKeys)
+                {
+                    pendingImportPaths = filePaths; keysRejected = true;
+                    importDialog = new ImportDialogState(ImportKind.Keys);
+                    return;
+                }
+                importError = string.Join("\n", failed.Select(f => f.FileName + "：" + B(f.Reason)));
+                return;
+            }
             importDialog = null;   // 成功自动关
         }
         catch (OperationCanceledException) { importError = ""; }

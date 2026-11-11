@@ -1,5 +1,6 @@
-// Android provider for the FPS core's platform accessors.  The FPS core is
-// not yet enabled in the Android session; this only supplies its primitives.
+// Android provider for the FPS core's platform accessors (runtime/src/fps.c,
+// started by native/runtime/runtime.c). Only game data goes through here; the
+// key-page slots and the frame-step page are host pages that fps.c stores itself.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif

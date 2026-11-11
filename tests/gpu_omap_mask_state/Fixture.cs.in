@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
+//
+// Production S2AOmapColorMask / UpdateRtColorMask / S2AClearFragmentOutputMap blocks from StateUpdater.cs,
+// compiled against recording endpoints. Not a GPU test. Expected values are worked out by hand.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+namespace Ryujinx.Graphics.Gpu.Engine.Threed
+{
+    static class Constants { public const int TotalRenderTargets = 8; }
+    // One bit per component, in the order the production method packs them (red 1, green 2, blue 4, alpha 8).
+    struct RtColorMask
+    {
+        public uint Bits;
+        public bool UnpackRed() => (Bits & 1) != 0;
+        public bool UnpackGreen() => (Bits & 2) != 0;
+        public bool UnpackBlue() => (Bits & 4) != 0;
+        public bool UnpackAlpha() => (Bits & 8) != 0;
+    }
+    sealed class Slots<T> { private readonly T[] _a = new T[Constants.TotalRenderTargets]; public Span<T> AsSpan() => _a; }
+    sealed class GuestRegisters { public bool RtColorMaskShared; public readonly Slots<RtColorMask> RtColorMask = new(); }
+    sealed class GuestState { public readonly GuestRegisters State = new(); }
+    sealed class FrontEndPipelineState { public readonly Slots<uint> ColorWriteMask = new(); }
+    sealed class HostPipeline
+    {
+        public readonly List<string> Calls = new();
+        public void SetRenderTargetColorMasks(ReadOnlySpan<uint> masks) => Calls.Add(string.Join(",", masks.ToArray().Select(m => m.ToString("x"))));
+    }
+    sealed class HostRenderer { public readonly HostPipeline Pipeline = new(); }
+    sealed class GpuContext { public readonly HostRenderer Renderer = new(); }
+    sealed class UpdateTracker { public readonly List<int> Forced = new(); public void ForceDirty(int groupIndex) => Forced.Add(groupIndex); }
+    sealed class StateUpdater
+    {
+        public const int ShaderStateIndex = 26;
+        public readonly GuestState _state = new();
+        public FrontEndPipelineState _pipeline = new();
+        public readonly GpuContext _context = new();
+        public readonly UpdateTracker _updateTracker = new();
+        // FIELD_DECLARATION
+        // MASK_FUNCTION
+        // UPDATE_MASK_METHOD
+        // CLEAR_MAP_METHOD
+        public void RegistersChanged() => UpdateRtColorMask();
+        // What UpdateShaderState does when the bound program's map differs from the remembered one.
+        public void ProgramChanged(uint map) { if (map != _s2aFragmentOutputMap) { _s2aFragmentOutputMap = map; UpdateRtColorMask(); } }
+    }
+    static class Program
+    {
+        static int _checks, _failed;
+        static void Check(bool ok, string what) { _checks++; if (!ok) { _failed++; Console.WriteLine("FAIL: " + what); } }
+        static StateUpdater New(params uint[] registers)
+        {
+            StateUpdater u = new();
+            for (int i = 0; i < registers.Length; i++) u._state.State.RtColorMask.AsSpan()[i].Bits = registers[i];
+            return u;
+        }
+        static string Last(StateUpdater u) => u._context.Renderer.Pipeline.Calls.Count == 0 ? "(none)" : u._context.Renderer.Pipeline.Calls[^1];
+        static int Count(StateUpdater u) => u._context.Renderer.Pipeline.Calls.Count;
+        static string Stored(StateUpdater u) => string.Join(",", u._pipeline.ColorWriteMask.AsSpan().ToArray().Select(m => m.ToString("x")));
+        const string AllFour = "f,f,f,f,0,0,0,0";
+        // Target 0: all four components. Target 2: red and green. Nothing else.
+        const uint MapT0T2 = 0x0000030f;
+
+        static int Main()
+        {
+            {
+                // 1. No program yet: the register masks are sent and stored.
+                StateUpdater u = New(0xf, 0xf, 0xf, 0xf);
+                u.RegistersChanged();
+                Check(Last(u) == AllFour, $"1 no program yet: sent {Last(u)}, expected {AllFour}");
+                Check(Stored(u) == AllFour, $"1 no program yet: stored {Stored(u)}, expected {AllFour}");
+
+                // 2. With a map in force the host gets register AND map ...
+                u.ProgramChanged(MapT0T2);
+                Check(Last(u) == "f,0,3,0,0,0,0,0", $"2 map {MapT0T2:x8}: sent {Last(u)}, expected f,0,3,0,0,0,0,0");
+                // 3. ... and the front-end pipeline state (handed to the shader cache) keeps the register masks.
+                Check(Stored(u) == AllFour, $"3 map {MapT0T2:x8}: stored {Stored(u)}, expected {AllFour}");
+
+                // 4. A register update with the map in force: sent is masked, stored is the new register value.
+                u._state.State.RtColorMask.AsSpan()[0].Bits = 0x7;
+                u._state.State.RtColorMask.AsSpan()[1].Bits = 0x5;
+                u.RegistersChanged();
+                Check(Last(u) == "7,0,3,0,0,0,0,0", $"4 register update: sent {Last(u)}, expected 7,0,3,0,0,0,0,0");
+                Check(Stored(u) == "7,5,f,f,0,0,0,0", $"4 register update: stored {Stored(u)}, expected 7,5,f,f,0,0,0,0");
+            }
+
+            // 5. Map 0 (the shader writes no colour): nothing is sent as writable, the stored state is untouched.
+            {
+                StateUpdater u = New(0xf, 0xf);
+                u.ProgramChanged(0);
+                Check(Last(u) == "0,0,0,0,0,0,0,0", $"5 map 0: sent {Last(u)}, expected 0,0,0,0,0,0,0,0");
+                Check(Stored(u) == "f,f,0,0,0,0,0,0", $"5 map 0: stored {Stored(u)}, expected f,f,0,0,0,0,0,0");
+            }
+
+            // 6. Shared register mode: every target reads register 0; stored follows the register, sent follows the map.
+            {
+                StateUpdater u = New(0xf, 0x0, 0x0, 0x0);
+                u._state.State.RtColorMaskShared = true;
+                u.ProgramChanged(MapT0T2);
+                Check(Last(u) == "f,0,3,0,0,0,0,0", $"6 shared register: sent {Last(u)}, expected f,0,3,0,0,0,0,0");
+                Check(Stored(u) == "f,f,f,f,f,f,f,f", $"6 shared register: stored {Stored(u)}, expected f,f,f,f,f,f,f,f");
+            }
+
+            // 7. DrawTexture with no map in force: nothing is sent, nothing is marked dirty.
+            {
+                StateUpdater u = New(0xf, 0xf, 0xf, 0xf);
+                u.S2AClearFragmentOutputMap();
+                Check(Count(u) == 0, $"7 no map in force: {Count(u)} send(s), expected 0");
+                Check(u._updateTracker.Forced.Count == 0, $"7 no map in force: {u._updateTracker.Forced.Count} group(s) marked dirty, expected 0");
+            }
+
+            // 8. DrawTexture with a map in force: the register masks are sent once and the shader group is marked
+            //    dirty once; a second DrawTexture does nothing more; the next draw of the same program applies
+            //    its map again.
+            {
+                StateUpdater u = New(0xf, 0xf, 0xf, 0xf);
+                u.ProgramChanged(0);
+                int before = Count(u);
+                u.S2AClearFragmentOutputMap();
+                Check(Count(u) == before + 1, $"8 map 0 in force: {Count(u) - before} send(s), expected 1");
+                Check(Last(u) == AllFour, $"8 map 0 in force: sent {Last(u)}, expected {AllFour}");
+                Check(u._updateTracker.Forced.SequenceEqual(new[] { StateUpdater.ShaderStateIndex }), $"8 groups marked dirty: [{string.Join(",", u._updateTracker.Forced)}], expected [{StateUpdater.ShaderStateIndex}]");
+                u.S2AClearFragmentOutputMap();
+                Check(Count(u) == before + 1 && u._updateTracker.Forced.Count == 1, $"8 second DrawTexture: {Count(u) - before} send(s) and {u._updateTracker.Forced.Count} dirty mark(s) in total, expected 1 and 1");
+                u.ProgramChanged(0);
+                Check(Last(u) == "0,0,0,0,0,0,0,0", $"8 same program after DrawTexture: sent {Last(u)}, expected 0,0,0,0,0,0,0,0");
+            }
+
+            Console.WriteLine(_failed == 0 ? $"gpu_omap_mask_state: {_checks} checks passed" : $"gpu_omap_mask_state: {_failed} of {_checks} checks FAILED");
+            return _failed == 0 ? 0 : 1;
+        }
+    }
+}

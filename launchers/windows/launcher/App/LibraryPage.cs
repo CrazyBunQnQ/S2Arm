@@ -32,7 +32,10 @@ public sealed partial class EnvironmentWindow
     {
         CapturePaths();
         if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
-        page = destination; Render();
+        page = destination;
+        // 环境检查页每次打开读一次装到 iPhone 的方式和开发者证书（InstallModePage.cs / DevCertPage.cs）
+        if (destination == "settings") { _ = RefreshInstallModeAsync(); if (!devCertLoading) _ = RefreshDevCertAsync(); }
+        Render();
     }
 
     /// <summary>

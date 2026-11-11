@@ -117,9 +117,13 @@ def rewrite(exefs, staging):
     os.makedirs(staging, exist_ok=True)
     if list(Path(staging).glob('*.widen.tsv')):
         sys.exit('【红】Android 改写目录包含残留宽屏点表')
-    # 帧率表不从环境继承（#48 D2）：改写器按 fps.tsv 打的读槽指令要 runtime/src/fps.c 往键页槽里写值（fps.c 文件头：
-    #   槽没人写游戏就读到 0，一款第一方动作冒险游戏速度 0 冻住），安卓没链 fps.c（android/core-link/Runtime.cmake）。接上 fps.c 之前不交给改写器。
+    # 帧率表（#48 D2）只认产物根自己的 fps.tsv（refresh 改写阶段放进来，同 iOS pack/orch/stages.py），不从环境继承：
+    #   改写器按它打的读槽指令要 runtime/src/fps.c 往键页槽里写值（槽没人写游戏就读到 0），所以交给改写器的必须是
+    #   同一份随包进游戏数据根、由 fps.c 起局读的表（entries_from_root 收 fps.tsv；android/native/runtime/runtime.c 起表）
     env = {k: v for k, v in os.environ.items() if k != 'S2A_FPS_TSV'}
+    fps_table = Path(exefs).parent / 'fps.tsv'
+    if fps_table.is_file():
+        env['S2A_FPS_TSV'] = str(fps_table)
     env.update(S2A_TARGET='android',
                S2A_REWRITE_SPIN=os.environ.get('S2A_REWRITE_SPIN', '0'),
                S2A_SDK_ADDR_CUT=os.environ.get('S2A_SDK_ADDR_CUT', '1'))
@@ -233,7 +237,8 @@ def entries_from_root(root, staging, sysdata=None, direct_vulkan=False):
         out.append(('romfs', overlay))
     # s2a_caps.tsv: the per-game capability list (fullscreen / 60 fps on unless a strong signal; rewrite stage writes it into the
     # product root for every platform) -- runtime.c applies it from the game data dir before loading modules, like iOS / Mac
-    for name in ('romfs.s2aidx', 'systemdata', 'aoc.tsv', 'aoc', 's2a_caps.tsv'):
+    # fps.tsv：60 帧表与改写器读的是同一份（rewrite()），fps.c 从游戏数据根读（#48 D2）
+    for name in ('romfs.s2aidx', 'systemdata', 'aoc.tsv', 'aoc', 's2a_caps.tsv', 'fps.tsv'):
         if name == 'systemdata':
             if system_data:
                 out.append((name, system_data))

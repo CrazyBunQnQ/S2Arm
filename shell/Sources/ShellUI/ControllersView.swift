@@ -66,7 +66,15 @@ public struct ControllersView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .scrollIndicators(.hidden)
-        .ignoresSafeArea(edges: .bottom)
+        // This page is an overlay on the screen's trailing edge — the library gives it the pane's width
+        // and trailing alignment — so the window's horizontal safe insets are positional: the frame
+        // already ends at the safe edge, and a scroll view that also insets its content for them spends
+        // the trailing inset (59pt in landscape) a second time inside the page, truncating every card
+        // and row on the right (device-measured right margin ≈89pt against the game pane's 24). The
+        // horizontal pair is ignored here, as the game settings pane ignores every edge; the top inset
+        // still positions the header where the page takes the whole width, and the bottom was already
+        // ignored with the content's own bottom padding below.
+        .modifier(TrailingOverlaySafeArea())   // 横向不扣安全区；灵动岛转到右边时右侧照扣（SensorEdge.swift）
         .onChange(of: focus.id) { _, id in
             guard let id, id.hasPrefix("ctl.") else { return }
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {

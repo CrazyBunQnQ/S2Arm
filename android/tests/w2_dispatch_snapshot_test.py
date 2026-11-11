@@ -70,7 +70,7 @@ class DispatchSnapshot(unittest.TestCase):
                     cmd=[os.environ.get('CC','cc'),'-std=c11','-D_POSIX_C_SOURCE=200809L','-O0']
                     cmd += ['-I'+str(p) for p in (inc,NATIVE/'direct',NATIVE/'nvn',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
                     cmd += [str(ROOT/'android/tests/w2_dispatch_snapshot_test.c'),str(src)]
-                    cmd += [str(NATIVE/p) for p in ('direct/bind_defer.c','direct/t2t_plan.c','direct/vk_clear.c','direct/vk_device.c','direct/gs_path.c','nvn/nvn_vk_format.c','nvn/nvn_vk_query.c')]
+                    cmd += [str(NATIVE/p) for p in ('direct/bind_defer.c','direct/t2t_plan.c','direct/buffer_texture_plan.c','direct/vk_clear.c','direct/vk_device.c','direct/gs_path.c','nvn/nvn_vk_format.c','nvn/nvn_vk_query.c')]
                     cmd += ['-Wl,-l:libvulkan.so.1','-lm','-o',str(exe)]
                     built=subprocess.run(cmd,text=True,capture_output=True)
                     self.assertEqual(built.returncode,0,built.stderr)

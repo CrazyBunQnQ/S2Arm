@@ -7,7 +7,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 [ "$(uname -s)" = Darwin ] || { echo "post_android_prepare：钩子只在 macOS 门禁机跑，非 macOS 只核跳过"; o=$(cd "$T" && bash "$H/tools/post_android_prepare.sh" 2>&1); r=$?
-  [ $r = 0 ] && grep -q 非 macOS <<< "$o" && { echo "post_android_prepare：非 macOS 只核了跳过分支，其余要 macOS（环境未就绪）"; exit 75; }; echo "非 macOS 没跳过：$o"; exit 1; }
+  [ $r = 0 ] && grep -q '非 macOS' <<< "$o" && { echo "post_android_prepare：非 macOS 只核了跳过分支，其余要 macOS（环境未就绪）"; exit 75; }; echo "非 macOS 没跳过：$o"; exit 1; }
 mk() {   # mk <目录>：假仓库；两路桩读 <目录>/<路>.check（只核标记的退出码）、<目录>/<路>.prep（prepare 退出码），调用记进 calls
   local d=$1 r; mkdir -p "$d/td/watch"
   for r in docker host; do mkdir -p "$d/android/$r"

@@ -57,6 +57,8 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
 // 自上次调用以来进入绘制路径的 draw 数 / 其中 depth-only 数（窗口汇总用；读取即清零）。
 // 这是“本窗多少笔”，不是 pass 关闭次数；每笔明细只在 debug.s2a.draw_log 打开时打印。
 void nvn_vk_first_draw_take_counts(uint64_t *draws, uint64_t *depth_only);
+// 逐帧 TSV 用的不清零累计（与 take_counts 窗口账互不影响；记站点同口径）。
+void nvn_vk_first_draw_draw_pass_totals(uint64_t *draws, uint64_t *passes);
 // 自上次调用以来 render pass 缓存的命中/新建次数，以及建 render pass / framebuffer 的累计耗时
 // （读取即清零）。用于判断 pass 对象创建是否还是每帧成本；命中多不等于成本已经降下来。
 void nvn_vk_first_draw_take_pass_stats(uint64_t *hits, uint64_t *miss, uint64_t *create_ns,
@@ -73,6 +75,8 @@ void nvn_vk_first_draw_gpu_read(struct s2a_vk_device *d, const char *where);
 int nvn_vk_first_draw_gpu_read_frame(struct s2a_vk_device *d, int parity, const char *where);
 // 最近一次成功读到的 GPU 帧时间；0 = 还没有有效值。成功读出后才更新，不拿未知冒充 0。
 int nvn_vk_first_draw_gpu_last(double *ms, int *passes, uint64_t *frame);
+// debug.s2a.gpu_time 开关是否开（不含设备能力：能力要 device、首帧 arm 才定）。
+int nvn_vk_first_draw_gpu_on(void);
 // 延迟槽已拿到完成证明并回收的帧数（W6 资源退休账）。
 uint64_t nvn_vk_first_draw_deferred_retired(void);
 void nvn_vk_first_draw_gpu_cancel(void);

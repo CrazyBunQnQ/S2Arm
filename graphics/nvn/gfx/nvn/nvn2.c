@@ -245,6 +245,9 @@ static uint64_t chat_sync0(void *sync) { if (sync) memset(sync, 0, 16); return 0
 static uint64_t (*g_sev_attach)(void *sev, int autoclear);
 void nvn2_sev_attach_register(uint64_t (*f)(void *, int)) { g_sev_attach = f; }
 static void chat_attach(void *sev) { if (sev && g_sev_attach) g_sev_attach(sev, 0); }
+// 摄像头视频存储（#116）：nvn2_codec.c 构造函数登记它的实现（那边有原生图像池）；没登记（安卓、不链 codec 的单测）照「没在聊」回 0
+static void *g_chat_video[4];   // 0 Calculate / 1 Initialize / 2 Finalize / 3 Get*ImageHandle
+void nvn2_chat_video_register(void *size, void *init, void *fini, void *handle) { g_chat_video[0] = size; g_chat_video[1] = init; g_chat_video[2] = fini; g_chat_video[3] = handle; }
 static void *chat_entry(const char *name) {
     static const char P[] = "_ZN2nn4chat";
     if (strncmp(name, P, sizeof P - 1)) return NULL;
@@ -261,6 +264,13 @@ static void *chat_entry(const char *name) {
         {"28RequestNextRemoteCameraImageEPNS_2gs16NativeSyncHandleEPNS0_21RemoteCameraVideoTypeEiS2_RKNS_7account23NetworkServiceAccountIdE", (void *)chat_sync0},
     };
     for (unsigned i = 0; i < sizeof t / sizeof *t; i++) if (!strcmp(n, t[i].n)) return t[i].f;
+    // 摄像头视频存储：真建原生图像（游戏开机就建、按序号取句柄建纹理；没人聊天时从不写入，#116），见 nvn2_codec.c nvn2_chat_video_*
+    { static const struct { const char *n; int k; } cv[] = {
+        {"35CalculateLocalCameraVideoBufferSizeEiii", 0}, {"36CalculateRemoteCameraVideoBufferSizeEiii", 0},
+        {"33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm", 1}, {"34InitializeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeEiiiPvm", 1},
+        {"31FinalizeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeE", 2}, {"32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE", 2},
+        {"25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi", 3}, {"26GetRemoteCameraImageHandleEPKNS0_21RemoteCameraVideoTypeEi", 3} };
+      for (unsigned i = 0; i < sizeof cv / sizeof *cv; i++) if (!strcmp(n, cv[i].n)) return g_chat_video[cv[i].k] ? g_chat_video[cv[i].k] : (void *)chat_ret0; }
     // 8 个 Attach*ChangedEvent（参数都是 nn::os::SystemEvent*）
     if (strstr(n, "AttachTo") && strstr(n, "EventEPNS_2os11SystemEventE")) return g_sev_attach ? (void *)chat_attach : NULL;
     // 语义不明、要真聊天才有意义的：屏幕共享替代图层（出参 vi::Layer*，回空图层游戏会接着用）——不在这里接管，交给下面红桩表点名
@@ -278,13 +288,11 @@ static void *chat_entry(const char *name) {
         "31SetLocalCameraZoomMagnificationEf", "13SetSharingKeyERKNS0_10SharingKeyE", "15ClearSharingKeyEv", "13ShowChatStartERKNS_7account3UidE",
         "22ShowCameraSharingGuideEv", "28ShowLocalCameraConfigurationENS0_25CameraImageProcessingModeE", "36ShowLocalCameraConfigurationVersion0ENS0_25CameraImageProcessingModeE",
         "46BeginFullScreenWithLocalCameraAvailableSectionEbb", "46BeginFullScreenWithLocalCameraAvailableSectionEb", "44EndFullScreenWithLocalCameraAvailableSectionEv",
-        "25StartLocalCameraStreamingEv", "24StopLocalCameraStreamingEv", "35CalculateLocalCameraVideoBufferSizeEiii",
-        "33InitializeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeEiiiPvm", "31FinalizeLocalCameraVideoStorageEPNS0_20LocalCameraVideoTypeE",
-        "25GetLocalCameraImageHandleEPKNS0_20LocalCameraVideoTypeEi",
+        "25StartLocalCameraStreamingEv", "24StopLocalCameraStreamingEv", 
+        
         "26StartRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "33StartRemoteCameraStreamingForTestERKNS_7account23NetworkServiceAccountIdE",
         "25StopRemoteCameraStreamingERKNS_7account23NetworkServiceAccountIdE", "32StopRemoteCameraStreamingForTestERKNS_7account23NetworkServiceAccountIdE",
-        "36CalculateRemoteCameraVideoBufferSizeEiii", "34InitializeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeEiiiPvm",
-        "32FinalizeRemoteCameraVideoStorageEPNS0_21RemoteCameraVideoTypeE", "26GetRemoteCameraImageHandleEPKNS0_21RemoteCameraVideoTypeEi",
+         
         "39SetAlternativeScreenSharingLayerEnabledEb", "23InitializeVirtualCameraEPNS0_17VirtualCameraTypeE", "21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE",
         "34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "19EnableVirtualCameraEPNS0_17VirtualCameraTypeE",
         "20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb",

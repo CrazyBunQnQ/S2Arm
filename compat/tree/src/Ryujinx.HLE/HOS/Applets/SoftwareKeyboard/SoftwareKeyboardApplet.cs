@@ -422,7 +422,8 @@ namespace Ryujinx.HLE.HOS.Applets
                         int wordSize = Unsafe.SizeOf<SoftwareKeyboardUserWord>();
                         remaining = stream.Length - stream.Position;
 
-                        if (wordsCount > MaxUserWords)
+                        // 负的词数（审计 P2-255）：同超上限，打警告照常回包；否则乘积为负、过了下面的长度检查，new 负长度数组抛异常、回包前就断
+                        if (wordsCount < 0 || wordsCount > MaxUserWords)
                         {
                             Logger.Warning?.Print(LogClass.ServiceAm, $"Received {wordsCount} User Words but the maximum is {MaxUserWords}");
                         }

@@ -80,6 +80,14 @@ namespace S2A.Services.Tests
                 }
                 using (FileStream cut = File.OpenWrite(Path.Combine(program, RomFsIndex.ImageName))) cut.SetLength(imageLength - 1);
                 Check("镜像被截短（推到一半）不使用", "null", RomFsIndex.OpenImage(program) == null ? "null" : "已打开");
+                // 审计 P1-151：截短 1 字节、没有 romfs/ → 起局失败（同魔数不对），不再带着空的游戏数据开局；有 romfs/ → 退回目录
+                string decided;
+                try { decided = RomFsIndex.Decide(RomFsIndex.OpenImage(program) != null, true, Directory.Exists(Path.Combine(program, "romfs")), program).ToString(); }
+                catch (InvalidDataException) { decided = "起局失败"; }
+                Check("截短镜像、没有 romfs/ 可退：起局失败", "起局失败", decided);
+                Check("截短镜像、有 romfs/：退回目录", "Directory", RomFsIndex.Decide(false, true, true, program).ToString());
+                Check("镜像可用：用镜像", "Image", RomFsIndex.Decide(true, true, false, program).ToString());
+                Check("没有镜像也没有目录：照旧只报缺（调用方报红）", "Missing", RomFsIndex.Decide(false, false, false, program).ToString());
                 File.Delete(Path.Combine(program, RomFsIndex.ImageName));
                 Check("没有镜像（旧格式资源包）", "null", RomFsIndex.OpenImage(program) == null ? "null" : "已打开");
             }

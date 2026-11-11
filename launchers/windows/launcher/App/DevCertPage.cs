@@ -39,13 +39,16 @@ public sealed partial class EnvironmentWindow
         var r = await DevCertJobAsync(new() { ["action"] = "status" });
         devCertLoading = false;
         if (r is { Succeeded: true }) devCert = r.Result.Clone();
-        if (page == "build") Render();
+        if (page is "build" or "settings") Render();
     }
 
     private static string Str(JsonElement e, string key) => e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
     private static bool Flag(JsonElement e, string key) => e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.True;
 
-    private Control DevCertRow()
+    /// <param name="title">一栏标题（缺省「签名方式」）；环境检查「装到 iPhone 的方式」卡里叫「签名身份」。</param>
+    /// <param name="appleIdTitle">Apple ID 那一项的名字（缺省「Apple ID 签名」）；环境检查卡里叫「Apple ID（在 Impactor 里登录）」。</param>
+    /// <param name="card">false = 只要内容不包卡片（嵌在别的卡片里时）。</param>
+    private Control DevCertRow(string? title = null, string? appleIdTitle = null, bool card = true)
     {
         if (devCert is null && !devCertLoading) _ = RefreshDevCertAsync();
         var st = devCert;
@@ -53,17 +56,17 @@ public sealed partial class EnvironmentWindow
         var active = st is { } s1 && Flag(s1, "active");
         var panel = new StackPanel { Spacing = 10 };
         var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 8 };
-        var title = Label(S("title"), 16); title.VerticalAlignment = VerticalAlignment.Center;
-        line.Children.Add(title);
-        Button Mode(string key, bool on, Action handler)
+        var heading = Label(title ?? S("title"), 16); heading.VerticalAlignment = VerticalAlignment.Center;
+        line.Children.Add(heading);
+        Button Mode(string key, bool on, Action handler, string? text = null)
         {
-            var b = new Button { Content = S(key), Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
+            var b = new Button { Content = text ?? S(key), Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
                 Background = on ? Accent : Brush.Parse("#29292D"), Foreground = on ? Canvas : Ink };
             AutomationId(b, "export.sign." + key);
             b.Click += (_, _) => handler();
             return b;
         }
-        var apple = Mode("appleId", !active, () => _ = SetDevCertAsync(false));
+        var apple = Mode("appleId", !active, () => _ = SetDevCertAsync(false), appleIdTitle);
         var mine = Mode("devcert", active, () => { if (imported) _ = SetDevCertAsync(true); else _ = ImportDevCertAsync(); });
         Grid.SetColumn(apple, 1); line.Children.Add(apple);
         Grid.SetColumn(mine, 2); line.Children.Add(mine);
@@ -105,7 +108,7 @@ public sealed partial class EnvironmentWindow
             panel.Children.Add(actions);
         }
         panel.Children.Add(Muted(S("switchNote"), 12.5));
-        return Card(panel, 14);
+        return card ? Card(panel, 14) : panel;
     }
 
     private async Task SetDevCertAsync(bool on)

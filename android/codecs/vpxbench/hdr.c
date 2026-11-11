@@ -1,4 +1,7 @@
 // See hdr.h. Field order and checks follow docs/设计_原生VP9/design_phase2_B.md §2 (header) and §3 (slot map).
+// Compressed-header 段的写出顺序与概率布局出处：libvpx 1.17.0 (pinned, BSD-3-Clause)
+// vp9/decoder/vp9_decodeframe.c `read_compressed_header`、vp9/common/vp9_entropymode.h——与
+// compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs 同款镜像，hdrcmp 金样测字节级一致。
 #include "hdr.h"
 
 #include <assert.h>
@@ -214,14 +217,258 @@ static int find_slot(const s2a_slots *s, uint32_t luma, uint32_t chroma, int w, 
     return -1;
 }
 
-const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots, const uint8_t *tiles,
-                            size_t tiles_size, uint8_t *dst, size_t cap, size_t *len, int *target)
+// ---- compressed header (spec §6.3): C mirror of compat/tree/.../Vp9CompressedHeader.cs ----
+// (section offsets live in hdr.h — the 3087-byte supplied-probs layout contract)
+
+typedef struct {
+    uint8_t *dst;
+    size_t cap, pos;
+    uint32_t low, range;
+    int count, error;
+} bcw;
+
+static void bcw_init(bcw *w, uint8_t *dst, size_t cap)
+{
+    w->dst = dst; w->cap = cap; w->pos = 0;
+    w->low = 0; w->range = 255; w->count = -24; w->error = 0;
+}
+
+static void bcw_write(bcw *w, int bit, int prob)
+{
+    uint32_t split = 1 + (((w->range - 1) * (uint32_t)prob) >> 8);
+    uint32_t range = split;
+    if (bit) { w->low += split; range = w->range - split; }
+    int shift = 0;
+    while (range < 128) { range <<= 1; shift++; }   // vpx_norm
+    w->count += shift;
+    if (w->count >= 0)
+    {
+        int offset = shift - w->count;
+        if (!w->error)
+        {
+            if (offset >= 1 && ((w->low << (offset - 1)) & 0x80000000u))
+            {
+                int x = (int)w->pos - 1;
+                while (x >= 0 && w->dst[x] == 0xff) w->dst[x--] = 0;
+                if (x >= 0) w->dst[x]++;
+            }
+            if (w->pos < w->cap) w->dst[w->pos++] = (uint8_t)((w->low >> (24 - offset)) & 0xff);
+            else w->error = 1;
+        }
+        w->low = (w->low << offset) & 0xffffffu;
+        shift = w->count;
+        w->count -= 8;
+    }
+    w->low <<= shift;
+    w->range = range;
+}
+
+static void bcw_bit(bcw *w, int bit) { bcw_write(w, bit, 128); }
+
+static void bcw_literal(bcw *w, int v, int bits)
+{
+    for (int i = bits - 1; i >= 0; i--) bcw_bit(w, (v >> i) & 1);
+}
+
+static int bcw_stop(bcw *w)
+{
+    for (int i = 0; i < 32; i++) bcw_bit(w, 0);
+    return w->error ? -1 : (int)w->pos;
+}
+
+static const uint8_t map_table[254] = {
+     20,  21,  22,  23,  24,  25,   0,  26,  27,  28,  29,  30,  31,  32,  33,
+     34,  35,  36,  37,   1,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,
+     48,  49,   2,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,
+      3,  62,  63,  64,  65,  66,  67,  68,  69,  70,  71,  72,  73,   4,  74,
+     75,  76,  77,  78,  79,  80,  81,  82,  83,  84,  85,   5,  86,  87,  88,
+     89,  90,  91,  92,  93,  94,  95,  96,  97,   6,  98,  99, 100, 101, 102,
+    103, 104, 105, 106, 107, 108, 109,   7, 110, 111, 112, 113, 114, 115, 116,
+    117, 118, 119, 120, 121,   8, 122, 123, 124, 125, 126, 127, 128, 129, 130,
+    131, 132, 133,   9, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144,
+    145,  10, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157,  11,
+    158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169,  12, 170, 171,
+    172, 173, 174, 175, 176, 177, 178, 179, 180, 181,  13, 182, 183, 184, 185,
+    186, 187, 188, 189, 190, 191, 192, 193,  14, 194, 195, 196, 197, 198, 199,
+    200, 201, 202, 203, 204, 205,  15, 206, 207, 208, 209, 210, 211, 212, 213,
+    214, 215, 216, 217,  16, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227,
+    228, 229,  17, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241,
+     18, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253,  19,
+};
+
+static int recenter_nonneg(int v, int m)
+{
+    if (v > (m << 1)) return v;
+    return v >= m ? (v - m) << 1 : ((m - v) << 1) - 1;
+}
+
+static int remap_prob(int v, int m)
+{
+    v--; m--;
+    int i = (m << 1) <= 255 ? recenter_nonneg(v, m) - 1 : recenter_nonneg(254 - v, 254 - m) - 1;
+    return map_table[i];
+}
+
+static void encode_uniform(bcw *w, int v)
+{
+    const int m = (1 << 8) - 191;   // 65 — decode_uniform's cutoff
+    if (v < m) bcw_literal(w, v, 7);
+    else { bcw_literal(w, m + ((v - m) >> 1), 7); bcw_literal(w, (v - m) & 1, 1); }
+}
+
+static void encode_term_subexp(bcw *w, int word)
+{
+    if (word < 16) { bcw_bit(w, 0); bcw_literal(w, word, 4); }
+    else if (word < 32) { bcw_bit(w, 1); bcw_bit(w, 0); bcw_literal(w, word - 16, 4); }
+    else if (word < 64) { bcw_bit(w, 1); bcw_bit(w, 1); bcw_bit(w, 0); bcw_literal(w, word - 32, 5); }
+    else { bcw_bit(w, 1); bcw_bit(w, 1); bcw_bit(w, 1); encode_uniform(w, word - 64); }
+}
+
+static void diff_update(bcw *w, int newp, int oldp)
+{
+    bcw_write(w, newp != oldp, 252);
+    if (newp != oldp) encode_term_subexp(w, remap_prob(newp, oldp));
+}
+
+static void mv_update(bcw *w, int newp, int oldp)
+{
+    bcw_write(w, newp != oldp, 252);
+    if (newp != oldp) bcw_literal(w, newp >> 1, 7);
+}
+
+static void diff_range(bcw *w, const uint8_t *probs, const uint8_t *def, int off, int n)
+{
+    for (int i = 0; i < n; i++) diff_update(w, probs[off + i], def[off + i]);
+}
+
+static void mv_range(bcw *w, const uint8_t *probs, const uint8_t *def, int off, int n)
+{
+    for (int i = 0; i < n; i++) mv_update(w, probs[off + i], def[off + i]);
+}
+
+static int region_equal(const uint8_t *probs, const uint8_t *def, int off, int n)
+{
+    return memcmp(probs + off, def + off, (size_t)n) == 0;
+}
+
+static int mv_even_diff(const uint8_t *probs, const uint8_t *def, int off, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (probs[off + i] != def[off + i] && (probs[off + i] & 1) == 0) return 1;
+    return 0;
+}
+
+static int compound_allowed(const s2a_pic *p)
+{
+    return p->sign_bias[2] != p->sign_bias[1] || p->sign_bias[3] != p->sign_bias[1];
+}
+
+const char *s2a_compressed_check(const s2a_pic *p, const uint8_t *probs, const uint8_t *defaults)
+{
+    const int key = (p->flags & S2A_KEY) != 0;
+    const int intra_only = !key && (p->flags & S2A_INTRA_ONLY);
+    // error_resilient only gates the compressed-header path: the repack emits error_resilient_mode=0
+    // and a resilient job derives use_prev_frame_mvs differently than the stream intended. libvpx's
+    // out-of-band path carries no such header, so the flag must not gate it (Vp9CompressedHeader.Check).
+    if (p->flags & S2A_ERROR_RES) return "error_resilient";
+    if (!key && !region_equal(probs, defaults, S2A_OFF_UV, 90)) return "uv_mode probs";
+    if (intra_only && (!region_equal(probs, defaults, S2A_OFF_YMODE, 36) ||
+                       !region_equal(probs, defaults, S2A_OFF_PARTITION, 48)))
+        return "intra probs";
+    if (key || intra_only) return NULL;
+    if (!compound_allowed(p) && p->ref_mode != 0) return "reference_mode";
+    if (mv_even_diff(probs, defaults, S2A_OFF_JOINTS, 3) || mv_even_diff(probs, defaults, S2A_OFF_SIGN, 2) ||
+        mv_even_diff(probs, defaults, S2A_OFF_CLASSES, 20) || mv_even_diff(probs, defaults, S2A_OFF_CLASS0, 2) ||
+        mv_even_diff(probs, defaults, S2A_OFF_BITS, 20) || mv_even_diff(probs, defaults, S2A_OFF_CLASS0FP, 12) ||
+        mv_even_diff(probs, defaults, S2A_OFF_FP, 6) ||
+        (p->allow_hp && (mv_even_diff(probs, defaults, S2A_OFF_CLASS0HP, 2) || mv_even_diff(probs, defaults, S2A_OFF_HP, 2))))
+        return "mv probs";
+    return NULL;
+}
+
+int s2a_compressed_write(const s2a_pic *p, const uint8_t *probs, const uint8_t *defaults,
+                         uint8_t *dst, size_t cap)
+{
+    bcw w;
+    bcw_init(&w, dst, cap);
+    bcw_bit(&w, 0);   // vpx_start_encode's leading 0
+    const int tx = p->lossless ? 0 : p->tx_mode;
+
+    if (!p->lossless)
+    {
+        bcw_literal(&w, tx > 3 ? 3 : tx, 2);
+        if (tx >= 3) bcw_bit(&w, tx == 4);
+    }
+    if (tx == 4)
+    {
+        diff_range(&w, probs, defaults, S2A_OFF_TX8, 2);
+        diff_range(&w, probs, defaults, S2A_OFF_TX16, 4);
+        diff_range(&w, probs, defaults, S2A_OFF_TX32, 6);
+    }
+    for (int t = 0, maxt = tx < 3 ? tx : 3; t <= maxt; t++)
+    {
+        int g = S2A_OFF_COEF + t * 432, upd = 0;
+        for (int i = 0; i < 4 && !upd; i++)
+            for (int b = 0; b < 6 && !upd; b++)
+                if (!region_equal(probs, defaults, g + (i * 6 + b) * 18, (b == 0 ? 3 : 6) * 3)) upd = 1;
+        bcw_bit(&w, upd);
+        if (upd)
+            for (int i = 0; i < 4; i++)
+                for (int b = 0; b < 6; b++)
+                    diff_range(&w, probs, defaults, g + (i * 6 + b) * 18, (b == 0 ? 3 : 6) * 3);
+    }
+    diff_range(&w, probs, defaults, S2A_OFF_SKIP, 3);
+
+    const int key = (p->flags & S2A_KEY) != 0;
+    const int intra_only = !key && (p->flags & S2A_INTRA_ONLY);
+    if (!key && !intra_only)
+    {
+        diff_range(&w, probs, defaults, S2A_OFF_INTERMODE, 21);
+        if (p->interp == 4) diff_range(&w, probs, defaults, S2A_OFF_SWINTERP, 8);
+        diff_range(&w, probs, defaults, S2A_OFF_INTRAINTER, 4);
+
+        if (compound_allowed(p))
+        {
+            bcw_bit(&w, p->ref_mode != 0);
+            if (p->ref_mode != 0) bcw_bit(&w, p->ref_mode == 2);
+        }
+        if (p->ref_mode == 2) diff_range(&w, probs, defaults, S2A_OFF_COMPINTER, 5);
+        if (p->ref_mode != 1) diff_range(&w, probs, defaults, S2A_OFF_SINGLEREF, 10);
+        if (p->ref_mode != 0) diff_range(&w, probs, defaults, S2A_OFF_COMPREF, 5);
+
+        diff_range(&w, probs, defaults, S2A_OFF_YMODE, 36);
+        diff_range(&w, probs, defaults, S2A_OFF_PARTITION, 48);
+
+        mv_range(&w, probs, defaults, S2A_OFF_JOINTS, 3);
+        for (int c = 0; c < 2; c++)
+        {
+            mv_range(&w, probs, defaults, S2A_OFF_SIGN + c, 1);
+            mv_range(&w, probs, defaults, S2A_OFF_CLASSES + c * 10, 10);
+            mv_range(&w, probs, defaults, S2A_OFF_CLASS0 + c, 1);
+            mv_range(&w, probs, defaults, S2A_OFF_BITS + c * 10, 10);
+        }
+        for (int c = 0; c < 2; c++)
+        {
+            mv_range(&w, probs, defaults, S2A_OFF_CLASS0FP + c * 6, 6);
+            mv_range(&w, probs, defaults, S2A_OFF_FP + c * 3, 3);
+        }
+        if (p->allow_hp)
+            for (int c = 0; c < 2; c++)
+            {
+                mv_range(&w, probs, defaults, S2A_OFF_CLASS0HP + c, 1);
+                mv_range(&w, probs, defaults, S2A_OFF_HP + c, 1);
+            }
+    }
+    return bcw_stop(&w);
+}
+
+static const char *frame_prepare(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots,
+                                 int ref_idx[3], int *target, int *min_log2, int *max_log2)
 {
     const int key = (p->flags & S2A_KEY) != 0;
     const int intra_only = !key && (p->flags & S2A_INTRA_ONLY);
     const int w = p->size_w[3], h = p->size_h[3];
     const unsigned bit_depth = (p->surface_params >> 1) & 0xf;
-    int min_log2, max_log2, ref_idx[3] = { 0, 0, 0 };
 
     // §2 checks
     if (p->seg_enabled) return "segmentation";
@@ -239,8 +486,8 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
         if (p->mode_deltas[i] > 63 || p->mode_deltas[i] < -63) return "loop filter delta";
     for (int i = 1; i < 4; i++)
         if (p->sign_bias[i] != 0 && p->sign_bias[i] != 1) return "sign bias";
-    tile_range(w, &min_log2, &max_log2);
-    if (p->log2_tile_cols < min_log2 || p->log2_tile_cols > max_log2) return "tile columns";
+    tile_range(w, min_log2, max_log2);
+    if (p->log2_tile_cols < *min_log2 || p->log2_tile_cols > *max_log2) return "tile columns";
     if (p->log2_tile_rows > 2) return "tile rows";
 
     // §3 slots
@@ -280,8 +527,21 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
         if (t < 0) return "no free slot";
         *target = t;
     }
+    return NULL;
+}
 
-    // §2 header
+// Uncompressed header bits + compressed bytes + tiles. *len receives the total; returns NULL or the reason.
+// mc: emit the byte-level fixups a real decoder requires (interp literal remap, tail-bit mask, marker
+// pad byte). The libvpx backend consumed the pre-fixup byte shape since this file existed — its emit
+// must keep producing those exact bytes (mc=0, Vp9NativeHeader.WriteUncompressed).
+static const char *frame_emit(const s2a_pic *p, const int ref_idx[3], int target, int min_log2, int max_log2,
+                              int mc, const uint8_t *compressed, size_t n_compressed,
+                              const uint8_t *tiles, size_t tiles_size, uint8_t *dst, size_t cap, size_t *len)
+{
+    const int key = (p->flags & S2A_KEY) != 0;
+    const int intra_only = !key && (p->flags & S2A_INTRA_ONLY);
+    const int w = p->size_w[3], h = p->size_h[3];
+
     bw b = { dst, cap, 0 };
     put(&b, 2, 2);                 // frame_marker
     put(&b, 0, 2);                 // profile 0
@@ -304,13 +564,13 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
         if (intra_only)
         {
             put(&b, 0x49, 8); put(&b, 0x83, 8); put(&b, 0x42, 8);
-            put(&b, 1u << *target, 8);   // refresh_frame_flags
+            put(&b, 1u << target, 8);    // refresh_frame_flags
             put(&b, (uint32_t)(w - 1), 16); put(&b, (uint32_t)(h - 1), 16);
             put(&b, 0, 1);
         }
         else
         {
-            put(&b, 1u << *target, 8);
+            put(&b, 1u << target, 8);
             for (int r = 0; r < 3; r++)
             {
                 put(&b, (uint32_t)ref_idx[r], 3);
@@ -321,7 +581,11 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
             put(&b, 0, 1);
             put(&b, p->allow_hp != 0, 1);
             put(&b, p->interp == 4, 1);
-            if (p->interp != 4) put(&b, p->interp, 2);
+            // p->interp is the bitstream literal already (NVDEC pic[121]; managed Decoder.cs runs
+            // LiteralToFilter itself) — write it verbatim on both paths. An earlier revision remapped
+            // enum→literal here, which double-swapped lit∈{0,1} streams into a wrong declaration.
+            if (p->interp != 4)
+                put(&b, (uint8_t)p->interp, 2);
         }
     }
     put(&b, 0, 1);                 // refresh_frame_context
@@ -351,14 +615,48 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
     }
     put(&b, p->log2_tile_rows != 0, 1);
     if (p->log2_tile_rows) put(&b, p->log2_tile_rows == 2, 1);
-    put(&b, 1, 16);                // header_size_in_bytes
+    put(&b, (uint32_t)n_compressed, 16);   // header_size_in_bytes
     size_t n = (b.bit + 7) >> 3;
-    if (n + 1 + tiles_size > cap) return "frame buffer too small";
-    if (b.bit & 7) dst[n - 1] &= (uint8_t)(0xff << (8 - (b.bit & 7)));
-    dst[n++] = 0;                  // stand-in compressed header
-    memcpy(dst + n, tiles, tiles_size);
-    *len = n + tiles_size;
+    if (n + n_compressed + tiles_size > cap) return "frame buffer too small";
+    if (mc && (b.bit & 7)) dst[n - 1] &= (uint8_t)(0xff << (8 - (b.bit & 7)));
+    memcpy(dst + n, compressed, n_compressed);
+    memcpy(dst + n + n_compressed, tiles, tiles_size);
+    size_t len0 = n + n_compressed + tiles_size;
+    // A packet whose last byte matches the superframe-index marker (110xxxxx) is reparsed by
+    // decoders as a multi-frame index — libvpx splits it into a phantom trailing frame. The spec
+    // guard: append a zero byte so the tail can never look like the index marker. MC-path only —
+    // the libvpx packet goes to the hook as a byte blob and must not grow a tail byte.
+    if (mc && (dst[len0 - 1] & 0xe0) == 0xc0)
+    {
+        if (len0 + 1 > cap) return "frame buffer too small";
+        dst[len0++] = 0;
+    }
+    *len = len0;
     return NULL;
+}
+
+const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots, const uint8_t *tiles,
+                            size_t tiles_size, uint8_t *dst, size_t cap, size_t *len, int *target)
+{
+    int ref_idx[3] = { 0, 0, 0 }, min_log2, max_log2;
+    const char *err = frame_prepare(p, sf, slots, ref_idx, target, &min_log2, &max_log2);
+    if (err) return err;
+    static const uint8_t standin[1] = { 0 };
+    return frame_emit(p, ref_idx, *target, min_log2, max_log2, 0, standin, 1, tiles, tiles_size, dst, cap, len);
+}
+
+const char *s2a_build_frame2(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots,
+                             const uint8_t *probs, const uint8_t *defaults, const uint8_t *tiles,
+                             size_t tiles_size, uint8_t *dst, size_t cap, size_t *len, int *target)
+{
+    int ref_idx[3] = { 0, 0, 0 }, min_log2, max_log2;
+    const char *err = frame_prepare(p, sf, slots, ref_idx, target, &min_log2, &max_log2);
+    if (err) return err;
+    uint8_t scratch[3456];
+    int nc = s2a_compressed_write(p, probs, defaults, scratch, sizeof scratch);
+    if (nc < 0) return "compressed header overflow";
+    return frame_emit(p, ref_idx, *target, min_log2, max_log2, 1, scratch, (size_t)nc, tiles, tiles_size,
+                      dst, cap, len);
 }
 
 void s2a_slots_commit(s2a_slots *slots, const s2a_pic *p, const s2a_surfaces *sf, int target)

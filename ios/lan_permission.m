@@ -19,6 +19,7 @@ static UIViewController *lan_top_vc(void) {
     UIViewController *top = nil;
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        if ([sc.session.role isEqualToString:UIWindowSceneSessionRoleExternalDisplayNonInteractive]) continue;   // 外接屏窗口（extdisplay.m）点不到，提示不往那里弹
         for (UIWindow *w in ((UIWindowScene *)sc).windows) if (w.isKeyWindow || !top) top = w.rootViewController;
     }
     while (top.presentedViewController) top = top.presentedViewController;

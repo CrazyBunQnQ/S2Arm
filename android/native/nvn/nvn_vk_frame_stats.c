@@ -96,6 +96,20 @@ void dm_longframe_note(const char *what) __attribute__((weak));
 
 void nvn_vk_frame_stats_present(uint64_t frame, double now_s, double exec_ms, double present_ms,
                                 uint64_t commands) {
+    // GPU 帧耗时（debug.s2a.gpu_time，默认关）：first_draw 在渲染 fence signal 后非阻塞读回
+    // 帧首/帧尾 TOP-BOTTOM 时间戳（CPU 不等 GPU）；这里取「最新结算帧」并去重——同一帧只报一次，
+    // 读不到就整段不输出（不写 0，对齐 iOS gpu_us 空口径）。
+    extern int nvn_vk_first_draw_gpu_last(double *, int *, uint64_t *) __attribute__((weak));
+    double gts_ms = 0.0; uint64_t gts_frame = 0;
+    char gpu_seg[48] = {0};
+    if (nvn_vk_first_draw_gpu_last && nvn_vk_first_draw_gpu_last(&gts_ms, NULL, &gts_frame)) {
+        static uint64_t g_gpu_emitted;
+        if (gts_frame != g_gpu_emitted) {
+            g_gpu_emitted = gts_frame;
+            snprintf(gpu_seg, sizeof gpu_seg, " gpu(f%llu)=%.2fms",
+                     (unsigned long long)gts_frame, gts_ms);
+        }
+    }
     if (g_last_present_s > 0) {
         g_win_frames++;
         g_win_gap_sum += now_s - g_last_present_s;
@@ -123,11 +137,11 @@ void nvn_vk_frame_stats_present(uint64_t frame, double now_s, double exec_ms, do
             char note[320];
             snprintf(note, sizeof note,
                      "frame %llu: gap %.1f ms, exec %.1f ms（区间内 编译 +%llu 次 %.1f ms、"
-                     "管线创建 +%llu 次 %.1f ms）| 等待/其它 %.1f ms",
+                     "管线创建 +%llu 次 %.1f ms）| 等待/其它 %.1f ms%s",
                      (unsigned long long)frame, gap_ms, exec_ms,
                      (unsigned long long)(c - prev_c), dc_ms,
                      (unsigned long long)(p - prev_p), dp_ms,
-                     other_ms > 0.0 ? other_ms : 0.0);
+                     other_ms > 0.0 ? other_ms : 0.0, gpu_seg);
             if (dm_longframe_note) dm_longframe_note(note);
             else LOGI("longframe(本帧): %s", note);
         }
@@ -140,8 +154,9 @@ void nvn_vk_frame_stats_present(uint64_t frame, double now_s, double exec_ms, do
         double w_gap = g_win_gap_sum * 1000.0 / wf;
         double w_exec = g_win_exec_sum * 1000.0 / wf;
         double w_pres = g_win_present_sum * 1000.0 / wf;
-        LOGI("frame timing(本帧): gap=%.1fms exec=%.1fms present=%.1fms other=%.1fms commands=%llu",
-             gap_ms, exec_ms, present_ms, gap_ms - exec_ms - present_ms, (unsigned long long)commands);
+        LOGI("frame timing(本帧): gap=%.1fms exec=%.1fms present=%.1fms other=%.1fms commands=%llu%s",
+             gap_ms, exec_ms, present_ms, gap_ms - exec_ms - present_ms, (unsigned long long)commands,
+             gpu_seg);
         {
             // 真实分位数（nearest-rank）：样本数就是窗口帧数，n 很小时 p95 会等于最大值——读取必须带 n，
             // 不能和更长的采样窗口直接比较。这里不再把窗口最大值写成 p90。

@@ -9,24 +9,7 @@
 // 弱链接[lab]：s2a_main_build_id（runtime/src/loader.c 主程序构建号；输入工作台不链原生核，取不到就不显示版本号提示）
 const char *s2a_main_build_id(void) __attribute__((weak_import));
 
-NSArray<NSDictionary *> *s2a_cheats_parse(NSString *text) {
-    NSMutableArray *out = [NSMutableArray array]; NSString *cur = nil; BOOL master = NO; NSInteger lines = 0;
-    void (^flush)(void) = ^{ if (lines > 0) [out addObject:@{@"name": cur ?: @"未命名", @"master": @(master)}]; };
-    for (NSString *raw in [text componentsSeparatedByString:@"\n"]) {
-        NSString *l = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (!l.length) continue;
-        unichar c = [l characterAtIndex:0];
-        if (c == '[' || c == '{') {
-            unichar close = c == '[' ? ']' : '}';
-            if (l.length < 2 || [l characterAtIndex:l.length - 1] != close) return nil;
-            flush(); lines = 0; master = c == '{';
-            cur = [[l substringWithRange:NSMakeRange(1, l.length - 2)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-            if (!cur.length) cur = master ? @"主代码" : @"未命名";
-        } else lines++;
-    }
-    flush();
-    return out;
-}
+// s2a_cheats_parse 在 ios/cheats_parse.m（只依赖 Foundation，Mac 单测 runtime/tests/t_cheats_parse.m 能直接编）
 
 // 本宿主有金手指界面：装载期向原生层登记，服务层（Cheats.cs）才起金手指线程（Mac / 安卓没有这个文件，不登记、不起）
 // 弱链接[lab]：s2a_cheats_host_enable（runtime/src/loader.c；输入工作台不链原生核，取不到就不登记）

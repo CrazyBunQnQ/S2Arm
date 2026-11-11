@@ -17,12 +17,5 @@ swift test "${swift_args[@]}" > build/macos/tests/swift-execution.log 2>&1 || sw
 cat build/macos/tests/swift-execution.log
 python3 launchers/macos/check_xctest.py build/macos/tests/swift-discovery.log build/macos/tests/swift-execution.log
 [ "$swift_rc" = 0 ] || exit "$swift_rc"
-xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Iruntime/include -Iios \
-  launchers/macos/Tests/input_test.m runtime/src/input_config.c runtime/src/pad.c ios/input_config.m -o build/macos/tests/input \
-  macos/ns2_controller.c macos/joycon_imu.m runtime/ns2pro/*.c runtime/ns2pro/NS2Transport.m -Iruntime/ns2pro/include \
-  -framework AppKit -framework CoreGraphics -framework GameController -framework CoreHaptics -framework QuartzCore -framework CoreBluetooth -framework IOKit
-build/macos/tests/input
-# 系统键盘桥接 Mac 端（textinput_mac.m + runtime/src/text_input.c）：真起 AppKit 表单，程序代填字 / 点按钮核回调
-xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Iruntime/include -Iios \
-  launchers/macos/Tests/textinput_test.m -o build/macos/tests/textinput -framework AppKit
-build/macos/tests/textinput
+# 原生输入（input_test.m）与系统键盘桥接（textinput_test.m）的 C / ObjC 单测挪到 tests/macos_native_input_test.sh（合入前层、按依赖文件路由；
+#   11-10：#417 Joy-Con 体感改走 HID 后 input_test 漏链 joycon_imu.m，这里只在合入后层跑，守望才发现）

@@ -14,7 +14,10 @@ N=${S2A_NX_UNPACK:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/nx_unpack/nx_unpa
 [ -x "$N" ] || { echo "【红】没有 ${N}（dotnet build -c Release pack/nx_unpack -o $(dirname "$N")）"; exit 1; }
 CUR=$(root_cur "$G"); [ -n "$CUR" ] && [ -f "$CUR/exefs/main" ] || { echo "【红】$G 现行产物根没有 exefs/main"; exit 1; }
 [ -f "$CUR/ctl/control.nacp" ] && { echo "🟢 $G 已有 ctl/control.nacp，跳过"; exit 0; }
-TAG=nacp-$(xxd -s 0x40 -l 4 -p "$CUR/exefs/main")
+# 构建号用 od 读（P2-278：原先用 xxd，玩家机没装 xxd 时写出「nacp-」空构建号仍退 0；od 是系统自带，输出同 xxd -p）
+BID=$(od -An -v -tx1 -j 64 -N 4 "$CUR/exefs/main" | tr -d ' \n')
+[[ "$BID" =~ ^[0-9a-f]{8}$ ]] || { echo "【红】$G 读不出 exefs/main 的构建号（0x40 起 4 字节，读到「${BID}」）"; exit 1; }
+TAG=nacp-$BID
 TAG=$(root_tag "$G" "$TAG"); W=$(root_begin "$G" "$TAG") || exit 1
 "$N" "$K" "$W" --nacp-only "$@" > "$W/nacp.log" 2>&1 || { echo "【红】${G}：$(tail -1 "$W/nacp.log")"; root_abort "$G" "$TAG"; exit 1; }
 root_commit "$G" "$TAG" || exit 1

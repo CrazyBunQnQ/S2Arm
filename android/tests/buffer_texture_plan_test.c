@@ -135,11 +135,16 @@ static int views(void) {
     in.texture.levels = 4;
     in.view = (struct s2a_bt_view){1, 1, 1, 1, 1, 0, 0, NVN_FORMAT_R16, 0, 4, 0, 1, NVN_TEXTURE_TARGET_2D};
     CHECK(plan(&in, &p) == 0); in.view.format = NVN_FORMAT_R16UI; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
-    in = input(); in.view.has = 1; in.view.set_levels = 1; in.view.nlevels = 0; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
-    in.view.nlevels = 1; in.view.base_level = 1; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
+    in = input(); in.view.has = 1; in.view.set_levels = 1; in.view.nlevels = 0;   // count 0 = to the last level
+    CHECK(plan(&in, &p) == 0 && !memcmp(&p, &before, sizeof p));
+    in.view.nlevels = -1; CHECK(rejects(in, S2A_BT_INVALID) == 0);
+    in.view.nlevels = 1; in.view.base_level = 1; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // one-level image
     in = input(); in.view.has = 1; in.view.set_layers = 1; in.view.min_layer = 1; in.view.nlayers = 1;
+    CHECK(rejects(in, S2A_BT_INVALID) == 0);   // one-layer image
+    in = input(); in.view.has = 1; in.view.set_target = 1; in.view.target = NVN_TEXTURE_TARGET_2D_ARRAY;
     CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
-    in = input(); in.view.has = 1; in.view.set_swizzle = 1; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
+    in = input(); in.view.has = 1; in.view.set_swizzle = 1;   // swizzle changes sampling, not copied bytes
+    CHECK(plan(&in, &p) == 0 && !memcmp(&p, &before, sizeof p));
     in.view.set_swizzle = 0; in.view.set_dsmode = 1; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);
     in.view.set_dsmode = 2; CHECK(rejects(in, S2A_BT_INVALID) == 0);
     in = input(); in.view.has = 2; CHECK(rejects(in, S2A_BT_INVALID) == 0);
@@ -150,20 +155,28 @@ static int views(void) {
 static int errors(void) {
     struct s2a_bt_input in = input(); struct s2a_bt_plan p;
 #define BAD(field, value, code) do { in = input(); in.field = value; CHECK(rejects(in, code) == 0); } while (0)
-    BAD(direction, 9, S2A_BT_INVALID); BAD(flags, 1, S2A_BT_UNSUPPORTED); BAD(flags, UINT32_MAX, S2A_BT_UNSUPPORTED);
+    BAD(direction, 9, S2A_BT_INVALID); BAD(flags, 4, S2A_BT_UNSUPPORTED); BAD(flags, UINT32_MAX, S2A_BT_UNSUPPORTED);   // mirror bits change the bytes
+    {   // LINEAR_FILTER / ENGINE_2D do not change a 1:1 buffer <-> texture copy: same plan as flags = 0
+        struct s2a_bt_plan none; in = input(); CHECK(plan(&in, &none) == 0);
+        for (uint32_t f = 1; f <= 3; f++) { in = input(); in.flags = f; CHECK(plan(&in, &p) == 0 && !memcmp(&p, &none, sizeof p)); }
+    }
     BAD(texture.width, 0, S2A_BT_INVALID); BAD(texture.width, UINT32_MAX, S2A_BT_INVALID);
-    BAD(texture.levels, 0, S2A_BT_INVALID); BAD(texture.layers, 2, S2A_BT_UNSUPPORTED);
-    BAD(texture.depth, 2, S2A_BT_UNSUPPORTED); BAD(texture.samples, 4, S2A_BT_UNSUPPORTED);
-    BAD(texture.target, NVN_TEXTURE_TARGET_3D, S2A_BT_UNSUPPORTED);
-    BAD(texture.nvn_format, NVN_FORMAT_DEPTH16, S2A_BT_UNSUPPORTED);
+    BAD(texture.levels, 0, S2A_BT_INVALID); BAD(texture.layers, 2, S2A_BT_INVALID);
+    BAD(texture.depth, 2, S2A_BT_INVALID); BAD(texture.depth, 0, S2A_BT_INVALID);
+    BAD(texture.samples, 4, S2A_BT_UNSUPPORTED);
+    BAD(texture.target, NVN_TEXTURE_TARGET_1D, S2A_BT_UNSUPPORTED);
+    BAD(texture.target, NVN_TEXTURE_TARGET_BUFFER, S2A_BT_UNSUPPORTED);
+    BAD(texture.target, NVN_TEXTURE_TARGET_CUBEMAP, S2A_BT_INVALID);   // a cube has six layers
+    BAD(texture.nvn_format, NVN_FORMAT_DEPTH24_STENCIL8, S2A_BT_UNSUPPORTED);
     BAD(texture.nvn_format, NVN_FORMAT_RGB8, S2A_BT_UNSUPPORTED);
-    BAD(texture.nvn_format, NVN_FORMAT_RGBA_DXT1, S2A_BT_UNSUPPORTED);
+    BAD(texture.nvn_format, NVN_FORMAT_RGBA_DXT1, S2A_BT_UNSUPPORTED);   // vk_format still R16
     BAD(texture.nvn_format, 0xff, S2A_BT_UNSUPPORTED);
     BAD(texture.vk_format, VK_FORMAT_R8_UNORM, S2A_BT_UNSUPPORTED);
     BAD(region.x, -1, S2A_BT_INVALID); BAD(region.y, INT32_MAX, S2A_BT_INVALID);
     BAD(region.width, 0, S2A_BT_INVALID); BAD(region.height, -1, S2A_BT_INVALID);
-    BAD(region.width, INT32_MAX, S2A_BT_INVALID); BAD(region.depth, 2, S2A_BT_UNSUPPORTED);
-    BAD(region.z, 1, S2A_BT_UNSUPPORTED); BAD(row_stride, 5, S2A_BT_INVALID);
+    BAD(region.width, INT32_MAX, S2A_BT_INVALID); BAD(region.depth, 2, S2A_BT_INVALID);
+    BAD(region.depth, -1, S2A_BT_INVALID); BAD(region.z, 1, S2A_BT_INVALID); BAD(region.z, -1, S2A_BT_INVALID);
+    BAD(row_stride, 5, S2A_BT_INVALID);
     BAD(image_stride, 15, S2A_BT_INVALID); BAD(guest_address, UINT64_MAX - 15, S2A_BT_INVALID);
     BAD(max_staging_bytes, 0, S2A_BT_INVALID); BAD(max_guest_span, 0, S2A_BT_INVALID);
     BAD(max_staging_bytes, 11, S2A_BT_LIMIT); BAD(max_guest_span, 15, S2A_BT_LIMIT);
@@ -181,9 +194,86 @@ static int errors(void) {
     in = input(); CHECK(s2a_buffer_texture_plan(&in, &p, NULL, 0) == 0);
     return 0;
 }
+// Subresources. Every expectation below is written from literal geometry.
+static int mips(void) {
+    // 32x32 RGBA8, 6 levels; the game uploads level 3 (4x4) through a view with base_level 3.
+    struct s2a_bt_input in = input(); struct s2a_bt_plan p; struct s2a_bt_span s;
+    in.texture = (struct s2a_bt_texture){NVN_FORMAT_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, 32, 32, 1, 6, 1, 1, NVN_TEXTURE_TARGET_2D};
+    in.view = (struct s2a_bt_view){1, 0, 1, 0, 0, 0, 0, 0, 3, 1, 0, 0, 0};
+    in.region = (struct s2a_bt_region){0, 0, 0, 4, 4, 1}; in.row_stride = in.image_stride = 0;
+    CHECK(plan(&in, &p) == 0); CHECK(p.mip == 3 && p.base_layer == 0 && p.layer_count == 1);
+    CHECK(p.row_bytes == 16 && p.rows == 4 && p.slices == 1 && p.staging_bytes == 64 && p.guest_span == 64);
+    CHECK(p.image_before.mip == 3 && p.image_after.mip == 3);
+    CHECK(s2a_buffer_texture_row(&p, 3, &s) == 0 && s.guest_address == 7 + 48 && s.staging_offset == 48);
+    in.view.base_level = 5; in.region.width = in.region.height = 1;   // level 5 is 1x1
+    CHECK(plan(&in, &p) == 0 && p.mip == 5 && p.staging_bytes == 4);
+    in.view.nlevels = 0; CHECK(plan(&in, &p) == 0 && p.mip == 5);     // as recorded by the game: base 5, count 0
+    in.view.nlevels = 1;
+    in.region.width = 2; CHECK(rejects(in, S2A_BT_INVALID) == 0);    // wider than level 5
+    in.view.base_level = 6; in.region.width = 1; CHECK(rejects(in, S2A_BT_INVALID) == 0);
+    in.view.base_level = 2; in.view.nlevels = 5; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // 2 + 5 > 6
+    return 0;
+}
+static int layers(void) {
+    // A 1x1 RGBA8 cube: one face per copy, the face in region z (Metal: slice = min_layer + z).
+    struct s2a_bt_input in = input(); struct s2a_bt_plan p; struct s2a_bt_span s;
+    in.texture = (struct s2a_bt_texture){NVN_FORMAT_RGBA8, VK_FORMAT_R8G8B8A8_UNORM, 1, 1, 1, 1, 6, 1, NVN_TEXTURE_TARGET_CUBEMAP};
+    in.view.has = 1; in.region = (struct s2a_bt_region){0, 0, 5, 1, 1, 1}; in.row_stride = in.image_stride = 0;
+    CHECK(plan(&in, &p) == 0); CHECK(p.base_layer == 5 && p.layer_count == 1 && p.z == 0 && p.depth == 1);
+    CHECK(p.image_before.base_layer == 5 && p.image_before.layer_count == 1);
+    in.region.z = 6; CHECK(rejects(in, S2A_BT_INVALID) == 0);
+    // All six faces at once from a 2D array view starting at layer 2 of a 3-cube array: layers 2..7.
+    in.texture.layers = 18; in.texture.target = NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
+    in.view = (struct s2a_bt_view){1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 2, 6, 0};
+    in.region = (struct s2a_bt_region){0, 0, 0, 1, 1, 6}; in.image_stride = 32;
+    CHECK(plan(&in, &p) == 0); CHECK(p.base_layer == 2 && p.layer_count == 6 && p.slices == 6);
+    CHECK(p.staging_bytes == 24 && p.guest_span == 5 * 32 + 4);
+    CHECK(s2a_buffer_texture_row(&p, 4, &s) == 0 && s.guest_address == 7 + 4 * 32 && s.staging_offset == 16 && s.bytes == 4);
+    CHECK(s2a_buffer_texture_row(&p, 6, &s) == S2A_BT_INVALID);
+    in.region.z = 11; in.region.depth = 6; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // 2 + 11 + 6 > 18
+    in.region.z = 0; in.texture.layers = 7; CHECK(rejects(in, S2A_BT_INVALID) == 0);  // not whole cubes
+    return 0;
+}
+static int volume(void) {
+    // 4x4x8 R16 3D, level 1 = 2x2x4: two depth slices at z 1, one VkBufferImageCopy with depth 2.
+    struct s2a_bt_input in = input(); struct s2a_bt_plan p;
+    in.texture = (struct s2a_bt_texture){NVN_FORMAT_R16, VK_FORMAT_R16_UNORM, 4, 4, 8, 2, 1, 1, NVN_TEXTURE_TARGET_3D};
+    in.view = (struct s2a_bt_view){1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0};
+    in.region = (struct s2a_bt_region){0, 0, 1, 2, 2, 2}; in.row_stride = in.image_stride = 0;
+    CHECK(plan(&in, &p) == 0); CHECK(p.mip == 1 && p.base_layer == 0 && p.layer_count == 1 && p.z == 1 && p.depth == 2);
+    CHECK(p.row_bytes == 4 && p.rows == 2 && p.image_stride == 8 && p.staging_bytes == 16 && p.guest_span == 16);
+    in.region.z = 3; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // 3 + 2 > 4 slices at level 1
+    in.texture.layers = 2; in.region.z = 0; CHECK(rejects(in, S2A_BT_INVALID) == 0);
+    return 0;
+}
+static int blocks(void) {
+    // 10x6 BC1 (8 bytes per 4x4 block): 3x2 blocks, the right/bottom blocks partial.
+    struct s2a_bt_input in = input(); struct s2a_bt_plan p; struct s2a_bt_span s;
+    in.texture = (struct s2a_bt_texture){NVN_FORMAT_RGBA_DXT1, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, 10, 6, 1, 1, 1, 1, NVN_TEXTURE_TARGET_2D};
+    in.region = (struct s2a_bt_region){0, 0, 0, 10, 6, 1}; in.row_stride = in.image_stride = 0;
+    CHECK(plan(&in, &p) == 0); CHECK(p.block_width == 4 && p.block_height == 4 && p.bytes_per_texel == 8);
+    CHECK(p.row_bytes == 24 && p.rows == 2 && p.staging_bytes == 48 && p.guest_span == 48);
+    CHECK(p.aspect == VK_IMAGE_ASPECT_COLOR_BIT);
+    in.region = (struct s2a_bt_region){4, 4, 0, 6, 2, 1}; in.row_stride = 40;   // the last block column/row, up to the edge
+    CHECK(plan(&in, &p) == 0 && p.row_bytes == 16 && p.rows == 1 && p.guest_span == 16);
+    CHECK(s2a_buffer_texture_row(&p, 0, &s) == 0 && s.guest_address == 7 && s.bytes == 16);
+    in.region = (struct s2a_bt_region){2, 0, 0, 4, 4, 1}; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // x off the block grid
+    in.region = (struct s2a_bt_region){0, 0, 0, 6, 4, 1}; CHECK(rejects(in, S2A_BT_INVALID) == 0);   // partial block not at the edge
+    return 0;
+}
+static int depth(void) {
+    // D16 uploads go to the depth aspect; depth-stencil formats stay unsupported.
+    struct s2a_bt_input in = input(); struct s2a_bt_plan p;
+    in.texture.nvn_format = NVN_FORMAT_DEPTH16; in.texture.vk_format = VK_FORMAT_D16_UNORM;
+    CHECK(plan(&in, &p) == 0); CHECK(p.aspect == VK_IMAGE_ASPECT_DEPTH_BIT && p.bytes_per_texel == 2);
+    CHECK(p.image_before.aspect == VK_IMAGE_ASPECT_DEPTH_BIT && p.image_after.aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+    in.texture.vk_format = VK_FORMAT_D32_SFLOAT; CHECK(rejects(in, S2A_BT_UNSUPPORTED) == 0);   // substituted storage
+    return 0;
+}
 int main(int argc, char **argv) {
     const struct { const char *name; int (*test)(void); } groups[] = {
-        {"grid", grid}, {"formats", formats}, {"spans", spans}, {"views", views}, {"errors", errors}
+        {"grid", grid}, {"formats", formats}, {"spans", spans}, {"views", views}, {"errors", errors},
+        {"mips", mips}, {"layers", layers}, {"volume", volume}, {"blocks", blocks}, {"depth", depth}
     };
     for (unsigned i = 0; i < sizeof groups / sizeof groups[0]; i++) {
         if (argc > 1 && strcmp(argv[1], groups[i].name)) continue;

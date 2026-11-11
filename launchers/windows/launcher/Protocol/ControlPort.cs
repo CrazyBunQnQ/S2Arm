@@ -158,7 +158,7 @@ public sealed class ControlPort : IDisposable
 public static class ControlJournal
 {
     private static readonly HashSet<string> Visible = new(StringComparer.Ordinal)
-        { "install", "installRemove", "installRestore", "import", "keys", "ipa", "moveGame", "setup" };
+        { "install", "installRemove", "installRestore", "installUpdate", "import", "keys", "ipa", "moveGame", "setup" };
 
     // 进程被强制结束时作业层来不及写终态：记录还是 running 而进程已不在，要按中断报，否则 s2armctl 一直等
     private static JsonElement Reconcile(JsonElement task)

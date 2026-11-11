@@ -19,7 +19,7 @@ int s2a_pack_apply(const char *docs); int s2a_untar(const char *tar, const char 
 int s2a_import_docs_pick(const s2a_launch_ctx *c, int game_data_env, const char *proc_docs, char *out, size_t n); int s2a_import_state_game(const char *proc_docs, const char *gid);
 int s2a_import_state_game_quick(const char *proc_docs, const char *gid);
 int s2a_game_install_state(const char *proc_docs, const char *gid);
-int s2a_import_state(const char *docs); void s2a_pack_help_detail(int st, int again, char *d, size_t n); extern void (*s2a_pack_apply_progress)(int done, int total);
+int s2a_img_scan(const char *proc_docs); int s2a_import_state(const char *docs); void s2a_pack_help_detail(int st, int again, char *d, size_t n); extern void (*s2a_pack_apply_progress)(int done, int total);
 // 与 runtime/src/pack_apply.c 同（闸门下一步与指纹记录）
 enum { S2A_GATE_READY, S2A_GATE_IMPORT, S2A_GATE_SETTLE, S2A_GATE_WAIT, S2A_GATE_STALLED, S2A_GATE_NONE, S2A_GATE_BROKEN };
 struct s2a_gate_watch { int n, moved; uint64_t fp; time_t changed; };
@@ -339,5 +339,42 @@ int main(void) {
             snprintf(qc, sizeof qc, "test ! -e '%s/.transfer'", qr); CHECK(sh(qc) == 0, "解开成功后 .transfer 已删");
             CHECK(s2a_game_install_state(pd, "0100FD70134FA000") == 1, "解开后 → 1 就绪"); } }
     }
+    // ⑬ 单一 IMG v1（资源包根 game.img，pack/img.py 写）：exefs / ctl 等小文件一次性解到资源包根。夹具现造（不含 RomFS 段，不要 dotnet），期望 = 夹具文件本身：
+    //   a 应用前导入状态 = 待导入（IMG 到了、小文件没解）；b s2a_pack_apply 成功、小文件逐字节同夹具、romfs.list 不解、.applied = manifest 的 index_sha256；
+    //   c 解出的文件没被「清掉不在 index.tsv 里的旧文件」删掉，应用后状态就绪；d 再应用一次不重写（修改时间不变）；e 格式号 9 → 解包失败、原因带「格式号」
+    { char R[1024]; snprintf(R, sizeof R, "%s", __FILE__); char *cut = strstr(R, "runtime/tests/"); if (cut) *cut = 0; if (!R[0]) strcpy(R, "./");
+      char D[1200], G[1300], c[6000]; snprintf(D, sizeof D, "%s/img_docs", T); snprintf(G, sizeof G, "%s/资源包", D);
+      snprintf(c, sizeof c, "mkdir -p '%s/src' '%s/shaders/direct' && head -c 5000 /dev/urandom > '%s/src/npdm' && printf NACP > '%s/src/nacp' && printf k > '%s/shaders/direct/keys.tsv'"
+               " && printf 'exefs/main.npdm\t%s/src/npdm\nctl/control.nacp\t%s/src/nacp\n' > '%s/src/others.tsv'"
+               " && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/game.img' --gid 0100abcd00000000 --pack-id img123 > /dev/null"
+               " && printf 'game.img\t%%s\tx\nshaders/direct/keys.tsv\t1\tx\n' $(stat -f %%z '%s/game.img' 2>/dev/null || stat -c %%s '%s/game.img') > '%s/index.tsv'"
+               " && printf '{\"version\":3,\"format\":\"img\",\"imgFile\":\"game.img\",\"index_sha256\":\"img123\"}' > '%s/manifest.json'",
+               D, G, D, D, G, D, D, D, R, D, G, G, G, G, G); CHECK(sh(c) == 0, "⑬ 造 IMG 夹具");
+      CHECK(s2a_import_state(D) == 1, "⑬a 应用前 → 待导入（状态 %d）", s2a_import_state(D));
+      CHECK(s2a_pack_apply(D) == 0, "⑬b s2a_pack_apply 成功");
+      snprintf(c, sizeof c, "cmp -s '%s/src/npdm' '%s/exefs/main.npdm' && cmp -s '%s/src/nacp' '%s/ctl/control.nacp' && test ! -e '%s/romfs.list' && test \"$(cat '%s/.applied')\" = img123",
+               D, G, D, G, G, G); CHECK(sh(c) == 0, "⑬b 小文件逐字节同夹具、romfs.list 不解、.applied = img123");
+      CHECK(s2a_import_state(D) == 0, "⑬c 应用后 → 就绪（状态 %d，解出的文件没被清旧文件删掉）", s2a_import_state(D));
+      snprintf(c, sizeof c, "touch -t 202001010000 '%s/exefs/main.npdm'", G); sh(c);
+      CHECK(s2a_pack_apply(D) == 0, "⑬d 再应用一次成功");
+      snprintf(c, sizeof c, "test \"$(stat -f %%m '%s/exefs/main.npdm' 2>/dev/null || stat -c %%Y '%s/exefs/main.npdm')\" = \"$(date -j -f %%Y%%m%%d%%H%%M%%S 20200101000000 +%%s 2>/dev/null || date -d 2020-01-01T00:00 +%%s)\"", G, G);
+      CHECK(sh(c) == 0, "⑬d 已在且长度对的不重写（修改时间不变）");
+      snprintf(c, sizeof c, "printf '\\011' | dd of='%s/game.img' bs=1 seek=8 conv=notrunc 2>/dev/null && rm -rf '%s/exefs' && printf '' > '%s/.applied'", G, G, G); sh(c);
+      CHECK(s2a_pack_apply(D) != 0, "⑬e 格式号 9 → 解包失败");
+      snprintf(c, sizeof c, "grep -q '格式号' '%s/unpack.log'", D); CHECK(sh(c) == 0, "⑬e 解包日志带「格式号」"); 
+      // ⑭ 玩家把 IMG 放进「文件」里 S2Arm 任意位置：s2a_img_scan 挪进 games/<头里的游戏号>/资源包/game.img、写 manifest（资源包号同头）与 index.tsv；
+      //   拷到一半的（长度不等于头里的整个文件长）不动；挪好后应用成功
+      char D3[1300]; snprintf(D3, sizeof D3, "%s/scan_docs", T);   // 小文件清单借 ⑬ 的夹具（exefs/main.npdm = 随机 5000 字节、ctl = NACP）
+      snprintf(c, sizeof c, "mkdir -p '%s/下载/x' && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/下载/x/某游戏.img' --gid 0100abcd00000002 --pack-id img789 > /dev/null"
+               " && head -c 20000 '%s/下载/x/某游戏.img' > '%s/半个.img'", D3, R, D, D3, D3, D3);
+      CHECK(sh(c) == 0, "⑭ 造夹具（第二层目录一个完整 IMG、根下一个拷到一半的）");
+      CHECK(s2a_img_scan(D3) == 1, "⑭ 扫到并挪好 1 个");
+      snprintf(c, sizeof c, "g='%s/games/0100ABCD00000002/资源包'; test -s \"$g/game.img\" && test ! -e '%s/下载/x/某游戏.img' && test -e '%s/半个.img' && grep -q '\"index_sha256\": \"img789\"' \"$g/manifest.json\" && test \"$(cut -f1 \"$g/index.tsv\")\" = game.img", D3, D3, D3);
+      CHECK(sh(c) == 0, "⑭ 落到 games/<游戏号>/资源包/game.img、manifest 资源包号 = 头里的、index.tsv 只有 game.img、拷一半的没动");
+      { char g3[1500]; snprintf(g3, sizeof g3, "%s/games/0100ABCD00000002", D3);
+        CHECK(s2a_import_state(g3) == 1, "⑭ 挪好后 → 待导入（状态 %d）", s2a_import_state(g3));
+        CHECK(s2a_pack_apply(g3) == 0, "⑭ 应用成功");
+        snprintf(c, sizeof c, "cmp -s '%s/src/npdm' '%s/资源包/exefs/main.npdm'", D, g3); CHECK(sh(c) == 0, "⑭ 小文件逐字节解出"); }
+      CHECK(s2a_img_scan(D3) == 0, "⑭ 再扫一次：没有新的（拷到一半的仍不动）"); }
     printf("%s t_pack_apply：%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

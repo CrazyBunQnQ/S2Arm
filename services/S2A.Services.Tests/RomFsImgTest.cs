@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+// 单一 IMG v1（pack/img.py 的布局，RomFsIndex.OpenImg）：服务层从 game.img 读 RomFS。夹具现造，期望 = 夹具文件本身（逐字节比）：
+//   ① 没有界面覆盖层：OpenImg 交出标准 RomFS 段，LibHac RomFsFileSystem 逐文件读回与源目录相同
+//   ② 有覆盖层（romfs_overlay/a/s.txt）：读到覆盖层那份（长度不同也行），其余文件仍读 IMG
+//   ③ 文件长度不等于头里的整个文件长（推到一半）→ null；④ 格式号 2 → 抛（起局失败、说清要更新 S2Arm）
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using Path = System.IO.Path;
+using LibHac.Common;
+using LibHac.Fs;
+using LibHac.Fs.Fsa;
+using LibHac.Tools.FsSystem.RomFs;
+
+namespace S2A.Services.Tests
+{
+    public static partial class Program
+    {
+        // IMG v1 夹具（同 pack/img.py：头一页 + 标准 RomFS 段 + romfs.list 一条 + 目录表）
+        static void WriteImgFixture(string romDir, string imgPath, uint format, IReadOnlyList<string> rels)
+        {
+            const int page = 16384;
+            File.WriteAllBytes(imgPath, new byte[page]);
+            long rl = RomFsIndex.WriteStandard(romDir, null, imgPath, page);
+            byte[] list = Encoding.UTF8.GetBytes(string.Join("", System.Linq.Enumerable.Select(rels, r => r + "\n")));
+            long lo = (page + rl + page - 1) / page * page;
+            long to = (lo + list.Length + page - 1) / page * page;
+            byte[] name = Encoding.UTF8.GetBytes("romfs.list");
+            using (FileStream f = new(imgPath, FileMode.Open, FileAccess.Write))
+            {
+                f.Position = lo; f.Write(list);
+                // 目录表：2 个槽，槽 0 放 romfs.list（哈希值只要非 0；服务层按名线性扫）
+                using BinaryWriter w = new(f, Encoding.UTF8, leaveOpen: true);
+                f.Position = to;
+                w.Write(2); w.Write(1);
+                w.Write(1UL); w.Write(lo); w.Write((long)list.Length); w.Write(0); w.Write(name.Length);
+                w.Write(new byte[32]);
+                w.Write(name);
+                long tl = f.Position - to, total = f.Position;
+                f.Position = 0;
+                w.Write("S2AIMG01"u8.ToArray()); w.Write(format); w.Write(0u); w.Write(Encoding.ASCII.GetBytes("0100ABCD00000000")); w.Write(new byte[64]);
+                w.Write((long)page); w.Write(rl); w.Write(to); w.Write(tl); w.Write(total);
+            }
+        }
+
+        static byte[] ReadRom(LibHac.Fs.IStorage s, string path)
+        {
+            RomFsFileSystem fs = new(s);
+            using var f = new UniqueRef<IFile>();
+            fs.OpenFile(ref f.Ref, path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            f.Get.GetSize(out long n).ThrowIfFailure();
+            byte[] b = new byte[n];
+            f.Get.Read(out long got, 0, b).ThrowIfFailure();
+            return b;
+        }
+
+        [SoloTest("--romfs-img")]
+        private static int RomFsImgTest()
+        {
+            string root = Path.Combine(Path.GetTempPath(), $"s2a_romfs_img_{Environment.ProcessId}");
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+            string rom = Path.Combine(root, "src", "romfs"), game = Path.Combine(root, "game");
+            Directory.CreateDirectory(Path.Combine(rom, "a")); Directory.CreateDirectory(game);
+            Random rnd = new(7);
+            byte[] big = new byte[70000]; rnd.NextBytes(big);
+            var files = new Dictionary<string, byte[]> { ["a/big.bin"] = big, ["a/s.txt"] = "hello"u8.ToArray(), ["top.dat"] = new byte[] { 1, 2, 3 } };
+            foreach (var kv in files) File.WriteAllBytes(Path.Combine(rom, kv.Key), kv.Value);
+            var rels = new List<string>(files.Keys); rels.Sort(StringComparer.Ordinal);
+            string img = Path.Combine(game, RomFsIndex.ImgName);
+            int bad = 0;
+            void Ck(bool ok, string what) { Console.WriteLine($"{(ok ? "✓" : "✗")} {what}"); if (!ok) bad++; }
+            try
+            {
+                WriteImgFixture(rom, img, 1, rels);
+                var s1 = RomFsIndex.OpenImg(game);
+                bool all = s1 != null; foreach (var kv in files) all &= s1 != null && ReadRom(s1, "/" + kv.Key).AsSpan().SequenceEqual(kv.Value);
+                Ck(all, "① 没有覆盖层：标准 RomFS 段逐文件读回与源目录相同");
+                Directory.CreateDirectory(Path.Combine(game, RomFsIndex.ImageOverlayDir, "a"));
+                File.WriteAllBytes(Path.Combine(game, RomFsIndex.ImageOverlayDir, "a", "s.txt"), "overlay!!"u8.ToArray());
+                var s2 = RomFsIndex.OpenImg(game);
+                Ck(s2 != null && Encoding.UTF8.GetString(ReadRom(s2, "/a/s.txt")) == "overlay!!" && ReadRom(s2, "/a/big.bin").AsSpan().SequenceEqual(big),
+                    "② 有覆盖层：a/s.txt 读覆盖层那份（长度不同），a/big.bin 仍读 IMG");
+                Directory.Delete(Path.Combine(game, RomFsIndex.ImageOverlayDir), true);
+                using (FileStream f = new(img, FileMode.Append)) f.WriteByte(0);
+                Ck(RomFsIndex.OpenImg(game) == null, "③ 长度与头里的整个文件长不符（推到一半）→ null");
+                string game2 = Path.Combine(root, "game2"); Directory.CreateDirectory(game2);   // 前面打开的句柄只许读，格式号 2 的夹具另放一个目录
+                WriteImgFixture(rom, Path.Combine(game2, RomFsIndex.ImgName), 2, rels);
+                string why = null; try { RomFsIndex.OpenImg(game2); } catch (InvalidDataException e) { why = e.Message; }
+                Ck(why != null && why.Contains("格式号 2"), $"④ 格式号 2 → 抛：{why}");
+            }
+            finally { Directory.Delete(root, true); }
+            Console.WriteLine($"{(bad == 0 ? "✓" : "✗")} RomFS 单一 IMG：{bad} 项不符");
+            return bad == 0 ? 0 : 1;
+        }
+    }
+}

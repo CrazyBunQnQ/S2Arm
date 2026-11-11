@@ -14,7 +14,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 P=$T/repo; mkdir -p $P/graphics/tools/direct/vklib $P/graphics/nvn/tools $P/graphics/nvn/games $P/translator $P/pack $P/tools
-cp "$H/graphics/tools/direct/direct_lib.sh" $P/graphics/tools/direct/; mkdir -p $P/pack/jobs && cp "$H/pack/jobs/space_rule.py" $P/pack/jobs/; cp "$H/pack/srcs.sh" $P/pack/; cp "$H/tools/progress.sh" "$H/tools/clonedir.py" "$H/tools/nostall.py" $P/tools/
+cp "$H/graphics/tools/direct/direct_lib.sh" $P/graphics/tools/direct/; mkdir -p $P/pack/jobs && cp "$H/pack/jobs/space_rule.py" "$H/pack/jobs/library.py" $P/pack/jobs/; cp "$H/pack/srcs.sh" $P/pack/; cp "$H/tools/progress.sh" "$H/tools/clonedir.py" "$H/tools/nostall.py" $P/tools/
 export FAKE_CALLS=$T/calls
 cat > $P/graphics/nvn/tools/gfx_api.py <<'EOF'
 import os

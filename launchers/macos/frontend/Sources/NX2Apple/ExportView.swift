@@ -3,6 +3,7 @@
 // TargetCard 的样子；安卓、鸿蒙置灰「即将上线，敬请期待」；勾选记住）→ 底栏（不能出包的原因，或「开始出包 · N 个平台」）。
 // 没有「游戏选项」（11-07 维护者）：游戏语言跟设备系统语言，Mac 主机模式 / 手机掌机模式，60 帧缺省开、起不来自动降级，满屏缺省通用 + 补丁包，都不用玩家选。
 import SwiftUI
+import UniformTypeIdentifiers
 import NXCore
 import NXModel
 import NXLauncher
@@ -27,6 +28,7 @@ struct ExportView: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 34) {
                     header
+                    Text(BackendText.launcherText("batch.hint", language: loc.lang == .zh ? "zh-Hans" : "en")).font(.manrope(12.5)).foregroundStyle(.secondary)
                     platforms
                 }
                 .padding(.horizontal, 40).padding(.top, 22).padding(.bottom, 40)
@@ -37,6 +39,11 @@ struct ExportView: View {
             actionBar
         }
         .onExitCommand { model.exportFor = nil }
+        // 批量出包（v0.2.4）：出包页上也能一次放进多款，识别完和这款一起列成清单、连续出包
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            LauncherView.fileURLs(providers) { urls in model.batchSeed = game.id; model.importGames(urls, partialResults: true) }
+            return true
+        }
     }
 
     // ---- the game ----
@@ -119,7 +126,7 @@ struct ExportView: View {
                 Text(loc.t("s2arm.export.platforms")).font(.manrope(15, .semibold)).foregroundStyle(.secondary).padding(.leading, 2)
                 Spacer()
                 if game.iphoneReady {
-                    Button(loc.t("s2arm.export.installExisting"), action: install)
+                    Button(loc.t(model.installKey("s2arm.export.installExisting")), action: install)
                         .buttonStyle(.plain).font(.manrope(12.5, .semibold)).foregroundStyle(LauncherPalette.cream.opacity(0.85))
                         .accessibilityIdentifier("export.install")
                 }
@@ -128,7 +135,7 @@ struct ExportView: View {
                 ForEach(ExportPlatform.allCases) { platform in tile(platform) }
             }
             locationRow
-            if model.exportTargets.contains(.ios) { deviceRow; DevCertRow(model: model) }
+            if model.exportTargets.contains(.ios) { deviceRow; InstallModeLine(model: model) }   // 签名 / 安装方式收进环境检查（v0.3.0），这里只读 + 更改
             if let error = model.choiceError {
                 Text(loc.backend(error)).font(.manrope(12)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
             }
@@ -149,14 +156,20 @@ struct ExportView: View {
             options.append((picked, (picked as NSString).abbreviatingWithTildeInPath))
         }
         options.append((Self.otherFolder, x("location.other")))
-        return HStack(spacing: 12) {
-            Image(systemName: "externaldrive").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
-            Text(x("location.title")).font(.manrope(13)).foregroundStyle(.secondary)
-            Spacer(minLength: 12)
-            LauncherDropdown(options: options, selection: location, label: x("location.title"), style: .button) { value in
-                if value == Self.otherFolder { chooseLocation() } else { location = value }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Image(systemName: "externaldrive").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+                Text(x("location.title")).font(.manrope(13)).foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                LauncherDropdown(options: options, selection: location, label: x("location.title"), style: .button) { value in
+                    if value == Self.otherFolder { chooseLocation() } else { location = value }
+                }
+                .accessibilityIdentifier("export.location")
             }
-            .accessibilityIdentifier("export.location")
+            if let slack = model.locationSlackText(location, language: loc.lang == .zh ? "zh-Hans" : "en") {   // #444：大分配单元 / 不是 APFS
+                Label(slack, systemImage: "exclamationmark.triangle").font(.manrope(12)).foregroundStyle(LauncherPalette.building)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("export.location.slack")
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .background(LauncherPalette.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
@@ -171,7 +184,7 @@ struct ExportView: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
         panel.prompt = x("location.choose")
-        if panel.runModal() == .OK, let url = panel.url { pickedLocation = url.path; location = url.path }
+        if panel.runModal() == .OK, let url = panel.url { pickedLocation = url.path; location = url.path; model.loadLocations(probe: url.path) }
     }
 
     /// 目标设备：连着手机就按它优化；没连提醒插上，也可以选机型（不挡出包）。

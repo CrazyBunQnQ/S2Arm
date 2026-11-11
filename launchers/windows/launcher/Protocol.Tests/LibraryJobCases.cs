@@ -68,6 +68,26 @@ internal static class LibraryJobCases
         var empty = LibraryCatalog.Parse(LibraryJobResult.Parse(recorded, 0, "recorded-catalog", "catalog").Result);
         check(empty.Games.Count == 0 && !empty.KeysReady, "recorded real empty Windows catalogue has no games or keys");
         check(empty.KeysMessage == "尚未导入 prod.keys", "recorded backend key status stays verbatim");
+        check(empty.PhoneUpdates.Count == 0, "catalog: no phoneUpdates field reads as an empty list");
+        // 壳比本版旧的手机（pack/jobs/install.py phone_updates 的形状）：一台两款、其中一款要重新出包；不是数组 / 没有 device 的项不算
+        const string updates = """
+        {"games":[],"keys":{"ready":true,"message":""},"phoneUpdates":[
+          {"device":"dev-key-1","name":"测试手机","fromShell":"s1","toShell":"s2",
+           "games":[{"gameId":"0100A","name":"Alpha"},{"gameId":"0100B","name":""}],"stale":[{"gameId":"0100B","name":""}]},
+          {"name":"no device"}]}
+        """;
+        using (var document = System.Text.Json.JsonDocument.Parse(updates))
+        {
+            var u = LibraryCatalog.Parse(document.RootElement).PhoneUpdates;
+            check(u.Count == 1 && u[0].Device == "dev-key-1" && u[0].Name == "测试手机" && u[0].FromShell == "s1" && u[0].ToShell == "s2",
+                "catalog: phoneUpdates device, name and shells read; entry without device skipped");
+            check(string.Join(",", u[0].Games.Select(g => g.Id + "=" + g.Name)) == "0100A=Alpha,0100B=0100B" &&
+                  string.Join(",", u[0].Stale.Select(g => g.Id)) == "0100B", "catalog: phoneUpdates games / stale, empty name falls back to the game id");
+        }
+        using (var document = System.Text.Json.JsonDocument.Parse(updates.Replace("\"phoneUpdates\":[", "\"phoneUpdates\":null,\"x\":[")))
+            check(LibraryCatalog.Parse(document.RootElement).PhoneUpdates.Count == 0, "catalog: phoneUpdates null reads as an empty list");
+        using (var document = System.Text.Json.JsonDocument.Parse(updates.Replace(",\"stale\":[{\"gameId\":\"0100B\",\"name\":\"\"}]", "")))
+            check(LibraryCatalog.Parse(document.RootElement).PhoneUpdates[0].Stale.Count == 0, "catalog: phoneUpdates entry without stale reads as none stale");
         var canonical = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "canonical-library"));
         using var setup = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new { library = canonical, libraryId = "legacy-id" }));
         LibraryConnection connection;
@@ -124,6 +144,14 @@ internal static class LibraryJobCases
         check(Locations(rows.Replace("\"last\":\"c\"", "\"last\":\"b\"")).DefaultFor(null) == "/lib", "locations: last one not connected → default location");
         try { Locations(rows.Replace("\"connected\":true,", "")); throw new Exception("accepted location without connected"); }
         catch (LibraryProtocolException) { check(true, "locations: row without connected rejected"); }
+        // #444：存放位置所在盘会让出包多占空间 / 可能失败（后端 libloc.slack_reason）；probe = 刚选的文件夹
+        check(places.Rows.All(r => r.Slack is null) && !places.Probed && places.ProbeSlack is null, "locations: no slack / probe fields read as none");
+        var slack = Locations(rows.Replace("\"freeBytes\":10,", "\"freeBytes\":10,\"format\":\"exfat\",\"clusterBytes\":524288,\"slackWarning\":true,\"slackReason\":\"cluster\",")
+            .Replace(",\"last\":\"c\"", ",\"last\":\"c\",\"probe\":{\"path\":\"E:\\\\games\",\"format\":\"fat32\",\"clusterBytes\":32768,\"slackWarning\":true,\"slackReason\":\"format\"}"));
+        check(slack.Rows[2].Slack == new LocationSlack("cluster", 524288) && slack.Rows[0].Slack is null, "locations: slack reason and cluster size per row");
+        check(slack.Probed && slack.ProbeSlack == new LocationSlack("format", 32768), "locations: probed folder's slack reason");
+        var fine = Locations(rows.Replace(",\"last\":\"c\"", ",\"last\":\"c\",\"probe\":{\"path\":\"C:\\\\S2Arm\",\"format\":\"ntfs\",\"clusterBytes\":4096,\"slackWarning\":false,\"slackReason\":null}"));
+        check(fine.Probed && fine.ProbeSlack is null, "locations: probed folder without a problem reads as probed, no slack");
 
         // ---- library layout v3 P4: catalog game.sizes, storageOverview job (shapes from pack/jobs/sizes.py for_catalog / overview) ----
         using (var document = System.Text.Json.JsonDocument.Parse(located.Replace("\"missing\":[],\"location\"",

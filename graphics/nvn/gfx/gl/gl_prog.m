@@ -496,26 +496,76 @@ GL(glUniform3iv, void, GLint loc, GLsizei n, const GLint *v) { CTX(); ivwrite(lo
 GL(glUniform4iv, void, GLint loc, GLsizei n, const GLint *v) { CTX(); ivwrite(loc, n, v, 4); }
 // mat2 / mat3：默认 uniform 块按 std140（glslang -R 的 gl_DefaultUniformBlock），每列占 16 字节（列内 2 / 3 个 float），数组元素步长取反射的 stride；
 //   transpose = 源按行主序给（GL ES 3.0 起允许），换成列主序写
-static void mwrite(GLint loc, GLsizei count, const GLfloat *v, int n, int transpose) {
+//   非方阵（GL 2.1 glUniformMatrixCxRfv：C 列 R 行）同样每列 16 字节、列内 R 个 float
+static void mwrite_cr(GLint loc, GLsizei count, const GLfloat *v, int cols, int rows, int transpose) {
     if (count < 0) { gl_set_error(GL_INVALID_VALUE); return; } if (loc == -1) return;
-    struct gl_program *p = gl_name_get(&gl_programs, gl_cur->prog); int i = loc % ELEM, el = loc / ELEM; char want[8]; snprintf(want, sizeof want, "mat%d", n);
-    if (!p || loc < 0 || i >= p->nu || strcmp(p->u[i].type, want)) { gl_set_error(GL_INVALID_OPERATION); return; }
+    struct gl_program *p = gl_name_get(&gl_programs, gl_cur->prog); int i = loc % ELEM, el = loc / ELEM; char want[8], alt[8];
+    if (cols == rows) { snprintf(want, sizeof want, "mat%d", cols); snprintf(alt, sizeof alt, "mat%dx%d", cols, rows); }
+    else { snprintf(want, sizeof want, "mat%dx%d", cols, rows); strlcpy(alt, want, sizeof alt); }
+    if (!p || loc < 0 || i >= p->nu || (strcmp(p->u[i].type, want) && strcmp(p->u[i].type, alt))) { gl_set_error(GL_INVALID_OPERATION); return; }
     gl_uniform *u = &p->u[i]; int m = u->count ? u->count : 1;
     if (!u->count && count > 1) { gl_set_error(GL_INVALID_OPERATION); return; }
     if (el + count > m) count = m - el;
-    size_t stride = u->stride ? (size_t)u->stride : (size_t)n * 16;
+    size_t stride = u->stride ? (size_t)u->stride : (size_t)cols * 16;
     for (int st = 0; st < 2; st++) {
         int o = u->off[st]; if (o < 0 || !p->ub[st]) continue;
         for (GLsizei k = 0; k < count; k++) {
-            size_t at = (size_t)o + (size_t)(el + k) * stride; if (at + (size_t)(n - 1) * 16 + (size_t)n * 4 > (size_t)p->ub_size[st]) break;
-            const float *src = v + (size_t)k * n * n;
-            for (int c = 0; c < n; c++) for (int r = 0; r < n; r++) ((float *)(p->ub[st] + at + (size_t)c * 16))[r] = transpose ? src[r * n + c] : src[c * n + r];
+            size_t at = (size_t)o + (size_t)(el + k) * stride; if (at + (size_t)(cols - 1) * 16 + (size_t)rows * 4 > (size_t)p->ub_size[st]) break;
+            const float *src = v + (size_t)k * cols * rows;
+            for (int c = 0; c < cols; c++) for (int r = 0; r < rows; r++) ((float *)(p->ub[st] + at + (size_t)c * 16))[r] = transpose ? src[r * cols + c] : src[c * rows + r];
         }
     }
     gl_cur->dirty |= GLD_RES;
 }
+static void mwrite(GLint loc, GLsizei count, const GLfloat *v, int n, int transpose) { mwrite_cr(loc, count, v, n, n, transpose); }
 GL(glUniformMatrix2fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite(loc, n, v, 2, (transpose & 0xff) != 0); }
 GL(glUniformMatrix3fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite(loc, n, v, 3, (transpose & 0xff) != 0); }
+GL(glUniformMatrix2x3fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 2, 3, (transpose & 0xff) != 0); }
+GL(glUniformMatrix3x2fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 3, 2, (transpose & 0xff) != 0); }
+GL(glUniformMatrix2x4fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 2, 4, (transpose & 0xff) != 0); }
+GL(glUniformMatrix4x2fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 4, 2, (transpose & 0xff) != 0); }
+GL(glUniformMatrix3x4fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 3, 4, (transpose & 0xff) != 0); }
+GL(glUniformMatrix4x3fv, void, GLint loc, GLsizei n, GLuint transpose, const GLfloat *v) { CTX(); mwrite_cr(loc, n, v, 4, 3, (transpose & 0xff) != 0); }
+// 无符号整数向量（GL 3.0 / ES 3.0）：成员类型必须是 uint / uvecN（规范：类型不符 INVALID_OPERATION）
+static void uvwrite(GLint loc, GLsizei count, const GLuint *v, int comps) {
+    if (count < 0) { gl_set_error(GL_INVALID_VALUE); return; } if (loc == -1) return;
+    struct gl_program *p = gl_name_get(&gl_programs, gl_cur->prog); char want[8]; if (comps == 1) strlcpy(want, "uint", sizeof want); else snprintf(want, sizeof want, "uvec%d", comps);
+    if (!p || loc < 0 || loc % ELEM >= p->nu || strcmp(p->u[loc % ELEM].type, want)) { gl_set_error(GL_INVALID_OPERATION); return; }
+    uwrite(loc, count, v, comps, 0);
+}
+GL(glUniform1uiv, void, GLint loc, GLsizei n, const GLuint *v) { CTX(); uvwrite(loc, n, v, 1); }
+GL(glUniform2uiv, void, GLint loc, GLsizei n, const GLuint *v) { CTX(); uvwrite(loc, n, v, 2); }
+GL(glUniform3uiv, void, GLint loc, GLsizei n, const GLuint *v) { CTX(); uvwrite(loc, n, v, 3); }
+GL(glUniform4uiv, void, GLint loc, GLsizei n, const GLuint *v) { CTX(); uvwrite(loc, n, v, 4); }
+// 读回 uniform 当前值（GL 4.5 §7.6.2 / ES 3.0 §2.12.6）：从默认块影子里按写入时的排法读（矩阵每列 16 字节、其余分量连续），采样器读它绑的纹理单元。
+//   LÖVE 引擎建着色器后逐个读回 uniform 的初值存进自己的表（Balatro），原先查表回空
+static void uread(GLuint prog, GLint loc, void *out, int as_float) {
+    struct gl_program *p = gl_name_get(&gl_programs, prog);
+    if (!p || !p->linked) { gl_set_error(p ? GL_INVALID_OPERATION : GL_INVALID_VALUE); return; }
+    if (loc >= p->nu && loc < p->nu + p->nsmp) { int unit = p->smp[loc - p->nu].unit; if (as_float) *(GLfloat *)out = (GLfloat)unit; else *(GLint *)out = unit; return; }
+    int i = loc % ELEM, el = loc / ELEM; if (loc < 0 || i >= p->nu) { gl_set_error(GL_INVALID_OPERATION); return; }
+    const gl_uniform *u = &p->u[i]; const char *t = u->type; int cols = 0, rows = 0;
+    if (!strncmp(t, "mat", 3)) { cols = t[3] - '0'; rows = t[4] == 'x' ? t[5] - '0' : cols; }
+    int tc = cols ? 0 : type_comps(t); if (!strcmp(t, "uvec2")) tc = 2; else if (!strcmp(t, "uvec3")) tc = 3;
+    size_t stride = u->stride ? (size_t)u->stride : cols ? (size_t)cols * 16 : (size_t)tc * 4;
+    int isint = !cols && (t[0] == 'i' || t[0] == 'u' || t[0] == 'b');
+    for (int st = 0; st < 2; st++) {
+        int o = u->off[st]; if (o < 0 || !p->ub[st]) continue;
+        const uint8_t *base = p->ub[st] + (size_t)o + (size_t)el * stride; int n = 0; uint32_t w[16];
+        if (cols) { for (int c = 0; c < cols; c++) for (int r = 0; r < rows; r++) w[n++] = ((const uint32_t *)(base + (size_t)c * 16))[r]; }
+        else { n = tc; memcpy(w, base, (size_t)n * 4); }
+        for (int k = 0; k < n; k++) {
+            float f; int32_t s; memcpy(&f, &w[k], 4); memcpy(&s, &w[k], 4);
+            if (as_float) ((GLfloat *)out)[k] = isint ? (GLfloat)s : f; else ((GLint *)out)[k] = isint ? s : (GLint)f;
+        }
+        return;
+    }
+    // 两个阶段都没用到这个 uniform（被优化掉）：读到初值 0
+    int n = cols ? cols * rows : type_comps(t); memset(out, 0, (size_t)n * 4);
+}
+GL(glGetUniformfv, void, GLuint prog, GLint loc, GLfloat *v) { CTX(); uread(prog, loc, v, 1); }
+GL(glGetUniformiv, void, GLuint prog, GLint loc, GLint *v) { CTX(); uread(prog, loc, v, 0); }
+GL(glGetUniformuiv, void, GLuint prog, GLint loc, GLuint *v) { CTX(); uread(prog, loc, v, 0); }
 
 // ---------- 名字查询与程序 / 着色器杂项 ----------
 GL(glIsShader, GLboolean, GLuint name) { CTX(0); return gl_name_get(&gl_shaders, name) != NULL; }     // glCreateShader 即建对象（不同于 Gen 类）

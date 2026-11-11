@@ -7,8 +7,9 @@
 # 只是静态扫描，动态拼出来的路径扫不到：门禁单测（tests/stage_keys_test.sh）拿它核「阶段声明的输入清单」漏没漏
 import ast, io, os, re, subprocess, sys, tokenize
 
-R = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True).stdout.strip()
-TR = set(subprocess.run(['git', '-C', R, 'ls-files'], capture_output=True, text=True).stdout.split('\n'))
+_ENV = os.environ.copy(); _ENV.pop('DEVELOPER_DIR', None)   # 账本 git 调用不吃工具链 env：坏 / 假 DEVELOPER_DIR 会让 /usr/bin/git 垫片 xcrun 报红
+R = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True, env=_ENV).stdout.strip()
+TR = set(subprocess.run(['git', '-C', R, 'ls-files'], capture_output=True, text=True, env=_ENV).stdout.split('\n'))
 VARS = {'R': '', 'ROOT': '', 'H': 'pack', 'NX': 'graphics/nvn', 'TOOLS': 'tools'}
 STOP = set()  # --table 里的「外」文件：收进闭包、不展开
 INC = set()   # 各脚本 clang -I 给的目录：被编的 .m / .c 的 #include 按它们找（-I 写在调用方脚本里、不在源文件里）

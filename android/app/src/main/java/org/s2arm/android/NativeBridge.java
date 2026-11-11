@@ -185,6 +185,16 @@ final class NativeBridge {
     /** 运行中切掌机 / 主机（接口 v2.15，会话在跑才调）：0=已应用；<0=宿主拒绝。 */
     static native int setConsoleMode(long host, int mode);
     /**
+     * #48 A4：系统省电档限帧开关写进原生直连 present 路径（native/system_tuning.c）。
+     * Java 轮询 GameManager.getGameMode() 后调用；任意线程，不等待。
+     */
+    static native void setBatteryCap(boolean enabled);
+    /**
+     * #48 A3：直连 present_period 最近一次登记的最终周期（纳秒，含省电档上限）；
+     * 0 = 还没上过屏或无上限路径。刷新率投票的真实来源，不是测得的 FPS。任意线程。
+     */
+    static native long presentPeriodNs();
+    /**
      * surfaceDestroyed only: returns once the render thread no longer uses the surface. Bounded:
      * if the render thread misses the deadline the process aborts instead of returning.
      */
@@ -199,6 +209,18 @@ final class NativeBridge {
     static String requestText(String title, String initial, int maxChars) {
         return MainActivity.requestText(title, initial, maxChars);
     }
+    /** 直连安全网：UTF-8 诊断字节进阻塞提示页（游戏线程等到玩家选「仍然启动」）。 */
+    static void dguardPrompt(byte[] diag) {
+        MainActivity.dguardPrompt(diag == null ? "" : new String(diag, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    /** 直连安全网：onTrimMemory/onLowMemory 前台内存告警，记一次失败证据（未武装时空转）。 */
+    static native void memoryWarning();
+    /** #48 P8：热状态（PowerManager.THERMAL_STATUS_*，读不到 -1）与省电模式，进共用 dm_thermal_now / dm_low_power_now。 */
+    static native void setPowerState(int thermalStatus, boolean powerSave);
+    /** 直连安全网：宿主版本号（BuildConfig.VERSION_NAME），起局前传一次，dguard 用它区分「另一个包」。 */
+    static native void setHostBuild(String build);
+    /** 存档原子提交判定（共用 direct_prompt.c）：每秒轮询，非 0 = 服务层报出原因位（只报一次）。 */
+    static native int pollSaveAtomic();
 
     static native String checkModules(String modulesDir);
     /** Maps exactly these rewritten module images (load check; nothing runs). Any thread. */

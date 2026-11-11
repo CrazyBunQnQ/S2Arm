@@ -878,7 +878,7 @@ class NoticeTests(unittest.TestCase):
 
     def test_link_only_official_https(self):
         for url, kept in (("https://github.com/jhaizhou-ops/S2Arm", True), ("https://jhaizhou-ops.github.io/S2Arm/", True),
-                          ("http://github.com/x", False), ("https://s2arm.com/", False), ("javascript:alert(1)", False)):
+                          ("http://github.com/x", False), ("https://s2arm.com/", True), ("https://evil.s2arm.com.example/", False), ("http://s2arm.com/", False), ("javascript:alert(1)", False)):
             with self.subTest(url=url):
                 self.assertEqual("url" in updater.notice_valid(dict(self.ITEM, url=url)), kept)
 

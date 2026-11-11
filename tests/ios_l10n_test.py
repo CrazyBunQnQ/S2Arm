@@ -28,7 +28,7 @@ iOS「设置」App 的 S2Arm 页 Root.plist 原文英文、zh-Hans.lproj/Root.st
 import json, os, pathlib, plistlib, re, shutil, subprocess, sys
 
 H = pathlib.Path(__file__).resolve().parents[1]
-SRCS = ['ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
+SRCS = ['ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/cheats_parse.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
         'ios/app.m', 'ios/app_settings.m', 'ios/controller.m', 'ios/diag.m', 'ios/diagredact.m', 'ios/dprompt.m', 'ios/hud.m', 'ios/iml_probe.m',
         'ios/lan_permission.m', 'ios/ldn_lan.m', 'ios/loadpage.m', 'ios/notice.m', 'ios/phone_motion.m', 'ios/save_transfer.m', 'ios/settings.m',
         'ios/textinput.m', 'ios/touch_config.m']
@@ -43,7 +43,8 @@ CHEATS_CS = '与服务层 Cheats.cs 约定的串（status.txt 状态值 / 条目
 REDACT = '诊断包脱敏（diag.m redact / diagredact.m）的匹配式与替换占位，只进诊断包给开发者看，不上屏'
 IDENT = {   # 文件 → {字面量（源码里的原样，含转义）: 不改的理由}
     'ios/vpad.m': {'提示条': 'setTouchOnly:why: 的原因串，只进日志「触屏布局：切到…」', '未注明': 's2a_vpad_set_touch_only 的原因缺省值，只进日志'},
-    'ios/vpad_cheats.m': {s: CHEATS_CS for s in ('未命名', '主代码', '生效中', '地址未就绪', '执行出错', '改代码，不支持', '格式不对', '版本不符', '关', '游戏未装载', '指令有误')},
+    'ios/cheats_parse.m': {s: CHEATS_CS for s in ('未命名', '主代码')},
+    'ios/vpad_cheats.m': {s: CHEATS_CS for s in ('未命名', '生效中', '地址未就绪', '执行出错', '改代码，不支持', '格式不对', '版本不符', '关', '游戏未装载', '指令有误')},
     'ios/diag.m': {'资源包': '单款包资源目录的真实文件夹名 Documents/资源包（pack_root 拼路径，launchctx / pack_apply 同一个名字）',
                    '<设备名>': REDACT, '\\n…截掉 %lu 字节…\\n': '诊断包里大日志截断处的标记行，只进诊断包'},
     'ios/diagredact.m': {'/Users/<用户>': REDACT, r'[^\\s\"' + "'" + r'<>:=,;{}\\[\\]，。]+的(iPhone|iPad)': REDACT, '[DEVICE_NAME]的$1': REDACT},
@@ -52,7 +53,7 @@ IDENT = {   # 文件 → {字面量（源码里的原样，含转义）: 不改�
 }
 # ⑥ C 字面量：只进日志 / 诊断的函数（按文件登记，理由写清楚去向）
 C_SINKS = {
-    'ios/app.m': {'s2a_ios_suspend': '前后台切换原因串，只进 host.log「iOS 壳：<原因> → …」与 GPU 闸门日志', 'snprintf': '内存分区 / 客体窗口账的日志行拼接（mem_split_line 与 10 秒心跳行），只进 host.log',
+    'ios/app.m': {'s2a_ios_suspend_enqueue': '前后台切换原因串，只进 host.log「iOS 壳：<原因> → …」与 GPU 闸门日志', 'snprintf': '内存分区 / 客体窗口账的日志行拼接（mem_split_line 与 10 秒心跳行），只进 host.log',
                   'mem_split_line': '内存跳变日志行的标签', 's2a_dump_threads': '线程现场转储的原因，只进 host.log', 's2a_dguard_evidence': '直连安全网失败记录的原因，只进诊断信息（不上屏）',
                   's2a_host_shutdown': '收局原因，只进 host.log', 's2a_boot_rebase': '起局计时日志', 'BOOT_MARK': '起局计时日志', 'die': 'LOG("FATAL …") 后退出（runtime/src/native.h）'},
     'ios/controller.m': {'system_fail_on_queue': '系统手柄震动失败的步骤名，只进日志「系统手柄震动：…」'},
@@ -65,9 +66,9 @@ IDENT_C = {
     'ios/iml_probe.m': {s: '地址档名，只拼进 [IML] 首启复核日志行' for s in ('地址上限读不到', '大地址档', '小地址档')},
 }
 UI_TEXT_H = 'runtime/include/s2a_ui_text.h'
-UI_USERS = ['runtime/src/pack_apply.c', 'runtime/src/qladder_host.c', 'runtime/src/ap_host.c', 'runtime/src/hud.c']
+UI_USERS = ['runtime/src/pack_apply.c', 'runtime/src/ap_host.c', 'runtime/src/hud.c']
 UI_STRONG = {'ios/app.m': 's2a_l10n_zh()', 'macos/front_mac.m': 'NSLocale.preferredLanguages'}   # iOS 按 App 本地化；Mac 宿主不带 .lproj，按系统首选语言
-DISPLAY_CALLS = {'runtime/src/pack_apply.c': {'s2a_ios_show_notice', 's2a_ios_show_pack_help'}, 'runtime/src/qladder_host.c': {'s2a_ios_ladder_note'}}
+DISPLAY_CALLS = {'runtime/src/pack_apply.c': {'s2a_ios_show_notice', 's2a_ios_show_pack_help'}}
 DISPLAY_FUNCS = {'runtime/src/pack_apply.c': ['s2a_pack_help_detail', 'help_title', 'gate_show'], 'runtime/src/ap_host.c': ['stall_note'], 'runtime/src/hud.c': ['s2a_hud_brief']}
 SAVE_CS = 'services/S2A.Services'
 SHELL_DIR = 'shell/Sources/S2ArmShellHost'

@@ -3,5 +3,6 @@
   <ItemGroup>
     <!-- The header writer and slot map are internal to Ryujinx.Graphics.Nvdec and depend on System only: compile them straight in. -->
     <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,69 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
+index a8114518a1e61f8b9360ebc9a3ea22dbe568af1d..774ee75e8c1c4d6ffd9f2efd95a74ef396c3bc6c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
+@@ -464,6 +464,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             float srcX1 = ((float)_state.State.DrawTextureDuDx / (1UL << 32)) * dstWidth + srcX0;
+             float srcY1 = ((float)_state.State.DrawTextureDvDy / (1UL << 32)) * dstHeight + srcY0;
+ 
++            // S2A（#468）：这次绘制用宿主自己的程序，上一个客户机程序的输出映射不适用。
++            engine.S2AClearFragmentOutputMap();
++
+             engine.UpdateState(ulong.MaxValue & ~(1UL << StateUpdater.ShaderStateIndex));
+ 
+             _channel.TextureManager.UpdateRenderTargets();
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 74abd936c9677e0599a762c52fba612878b20b1a..3b91bb64ed714bbf4602fcbff97b68f6a3a5f0aa 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -1289,6 +1289,18 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             return componentMask & ((fragmentOutputMap >> (index * 4)) & 0xf);
+         }
+ 
++        // S2A（#468）：DrawTexture 用宿主自己的程序画，不跑客户机片元着色器，上一个程序的输出映射对它不适用：
++        // 先恢复成寄存器掩码，再把着色器状态标脏，下一次普通绘制按当时的程序重新取映射。映射本来就是全 1 时什么都不做。
++        public void S2AClearFragmentOutputMap()
++        {
++            if (_s2aFragmentOutputMap != uint.MaxValue)
++            {
++                _s2aFragmentOutputMap = uint.MaxValue;
++                UpdateRtColorMask();
++                _updateTracker.ForceDirty(ShaderStateIndex);
++            }
++        }
++
+         /// <summary>
+         /// Updates host render target color masks, based on guest GPU state.
+         /// This defines which color channels are written to each color buffer.
+@@ -1312,10 +1324,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 componentMask |= (colorMask.UnpackBlue() ? 4u : 0u);
+                 componentMask |= (colorMask.UnpackAlpha() ? 8u : 0u);
+ 
++                // S2A（#468）：_pipeline 里留寄存器掩码。这份状态在取程序时交给着色器缓存（再进规格状态、磁盘缓存、
++                // 程序记录），那一刻记着的还是上一个程序的映射；存并过的值，同一个程序会因为之前绑的程序不同记下不同的状态。
++                colorWriteMaskSpan[index] = componentMask;
++
+                 componentMask = S2AOmapColorMask(componentMask, _s2aFragmentOutputMap, index);
+ 
+                 componentMasks[index] = componentMask;
+-                colorWriteMaskSpan[index] = componentMask;
+             }
+ 
+             _context.Renderer.Pipeline.SetRenderTargetColorMasks(componentMasks);
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+index a2d6fc61ca594a3e4af772c276209b890fe49566..0db145f730a714e5d35cf21efb7241f4087ef5c1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+@@ -203,6 +203,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             _stateUpdater.ForceShaderUpdate();
+         }
+ 
++        // S2A（#468）：见 StateUpdater.S2AClearFragmentOutputMap。
++        public void S2AClearFragmentOutputMap()
++        {
++            _stateUpdater.S2AClearFragmentOutputMap();
++        }
++
+         /// <summary>
+         /// Create any syncs from WaitForIdle command that are currently pending.
+         /// </summary>

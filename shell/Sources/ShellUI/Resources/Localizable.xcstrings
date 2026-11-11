@@ -1,6 +1,54 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Reorder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reorder"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排序"
+          }
+        }
+      }
+    },
+    "Reorder games": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reorder games"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "游戏排序"
+          }
+        }
+      }
+    },
+    "Drag the handle up or down to reorder.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Drag the handle up or down to reorder."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按住右侧拖动柄，上下调整游戏顺序。"
+          }
+        }
+      }
+    },
     "%lld of %lld": {
       "localizations": {
         "de": {
@@ -4557,6 +4605,22 @@
         }
       }
     },
+    "Glass on the floating buttons and the main action, on systems that offer it.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Glass on the floating buttons and the main action, on systems that offer it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在支持的系统上，浮动按钮与主操作使用玻璃质感。"
+          }
+        }
+      }
+    },
     "Handheld": {
       "localizations": {
         "de": {
@@ -5703,6 +5767,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "左扳机键"
+          }
+        }
+      }
+    },
+    "Liquid Glass": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liquid Glass"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "液态玻璃"
           }
         }
       }

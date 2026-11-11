@@ -1,3 +1,4 @@
+using System;
 using Ryujinx.Common;
 using Ryujinx.Horizon.Common;
 using Ryujinx.Horizon.Sdk.Sf;
@@ -7,6 +8,44 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
 {
     partial class HardwareOpusDecoderManager : IHardwareOpusDecoderManager
     {
+        // S2Arm：四个打开入口共用（审计 P2-276：原先同一段写了四份）。同时存活的解码器有上限，到上限按真机回「资源不足」，
+        //   游戏 SDK 走温和分支（HardwareOpusDecoder.MaxLive）；mapping 为空 = 单流
+        private static Result CreateDecoder(out IHardwareOpusDecoder decoder, int workBufferHandle, int sampleRate, int channels,
+            int streams = 0, int coupledStreams = 0, byte[] mapping = null)
+        {
+            decoder = null;
+
+            if (!HardwareOpusDecoder.TryReserve())
+            {
+                HorizonStatic.Syscall.CloseHandle(workBufferHandle);
+
+                return CodecResult.OutOfDecoders;
+            }
+
+            try
+            {
+                decoder = (mapping == null
+                    ? new HardwareOpusDecoder(sampleRate, channels, workBufferHandle)
+                    : new HardwareOpusDecoder(sampleRate, channels, streams, coupledStreams, mapping, workBufferHandle)).MarkReserved();
+            }
+            catch (Exception error)
+            {
+                // 构造失败：名额还回去；构造到一半的对象不会 Dispose，交进来的工作缓冲句柄在这里关（审计 P2-276）
+                HardwareOpusDecoder.ReleaseReservation();
+                HorizonStatic.Syscall.CloseHandle(workBufferHandle);
+
+                // libopus 拒绝这组参数（NativeDecoder 抛 ArgumentException）：回参数错误，不让异常冲出服务分发（分发层不接它）
+                if (error is ArgumentException)
+                {
+                    return CodecResult.OpusBadArg;
+                }
+
+                throw;
+            }
+
+            return Result.Success;
+        }
+
         [CmifCommand(0)]
         public Result OpenHardwareOpusDecoder(
             out IHardwareOpusDecoder decoder,
@@ -30,9 +69,7 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
                 return CodecResult.InvalidChannelCount;
             }
 
-            decoder = new HardwareOpusDecoder(parameter.SampleRate, parameter.ChannelsCount, workBufferHandle);
-
-            return Result.Success;
+            return CreateDecoder(out decoder, workBufferHandle, parameter.SampleRate, parameter.ChannelsCount);
         }
 
         [CmifCommand(1)]
@@ -89,15 +126,7 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
                 return CodecResult.InvalidNumberOfStreams;
             }
 
-            decoder = new HardwareOpusDecoder(
-                parameter.SampleRate,
-                parameter.ChannelsCount,
-                parameter.NumberOfStreams,
-                parameter.NumberOfStereoStreams,
-                parameter.ChannelMappings.AsSpan().ToArray(),
-                workBufferHandle);
-
-            return Result.Success;
+            return CreateDecoder(out decoder, workBufferHandle, parameter.SampleRate, parameter.ChannelsCount, parameter.NumberOfStreams, parameter.NumberOfStereoStreams, parameter.ChannelMappings.AsSpan().ToArray());
         }
 
         [CmifCommand(3)] // 3.0.0+
@@ -155,9 +184,7 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
                 return CodecResult.InvalidSampleRate;
             }
 
-            decoder = new HardwareOpusDecoder(parameter.SampleRate, parameter.ChannelsCount, workBufferHandle);
-
-            return Result.Success;
+            return CreateDecoder(out decoder, workBufferHandle, parameter.SampleRate, parameter.ChannelsCount);
         }
 
         [CmifCommand(5)] // 12.0.0+
@@ -196,15 +223,7 @@ namespace Ryujinx.Horizon.Sdk.Codec.Detail
                 return CodecResult.InvalidNumberOfStreams;
             }
 
-            decoder = new HardwareOpusDecoder(
-                parameter.SampleRate,
-                parameter.ChannelsCount,
-                parameter.NumberOfStreams,
-                parameter.NumberOfStereoStreams,
-                parameter.ChannelMappings.AsSpan().ToArray(),
-                workBufferHandle);
-
-            return Result.Success;
+            return CreateDecoder(out decoder, workBufferHandle, parameter.SampleRate, parameter.ChannelsCount, parameter.NumberOfStreams, parameter.NumberOfStereoStreams, parameter.ChannelMappings.AsSpan().ToArray());
         }
 
         [CmifCommand(7)] // 12.0.0+

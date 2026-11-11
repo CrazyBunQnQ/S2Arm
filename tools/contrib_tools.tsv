@@ -4,6 +4,14 @@
 钩子 services/gate.sh	.NET 10 SDK
 单测 csproj_closure_test	.NET 10 SDK
 单测 multirange_test	.NET 10 SDK
+单测 services_lifecycle_test	.NET 10 SDK
+单测 libhac_horizon_dispose_test	.NET 10 SDK
+单测 macrogen_synthetic_test	.NET 10 SDK
+单测 vulkan_reserved_bindings_test	.NET 10 SDK
+单测 nxaot_key_test	.NET 10 SDK
+单测 host_boot_failure_test	.NET 10 SDK
+单测 services_provider_test	.NET 10 SDK
+单测 sysdata_synth_test	.NET 10 SDK
 单测 save_transfer_interop_test	.NET 10 SDK,Xcode
 单测 vpx_patch_identity_test	Xcode
 iOS 全量编译	Xcode
@@ -15,6 +23,8 @@ iOS 全量编译	Xcode
 # 只在 macOS 上成立的单测（缺条件退 75）：Linux 自检按 Xcode 记「交 Mac 门禁」不选它们，否则整份自检只因它们退 75
 单测 linux_ctest_colima_test	Xcode
 单测 dmsh_sc_identity_test	Xcode
+单测 post_android_prepare_test	Xcode
+单测 macos_native_input_test	Xcode
 # Mac 出包 / 普查链：真实调用 Apple 工具链、BSD 工具或 APFS 克隆；非 Mac 宿主交 Mac 门禁验证，不记为本机通过。
 单测 app_only_test	Xcode
 单测 bake_cache_test	Xcode

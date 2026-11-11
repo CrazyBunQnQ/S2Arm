@@ -6930,5 +6930,17 @@
  {
   "source": "把诊断包放到所选位置",
   "en": "moving the package to the chosen location"
+ },
+ {
+  "source": "游戏库里已经没有这款游戏",
+  "en": "This game is no longer in your library"
+ },
+ {
+  "source": "这台电脑出不了这个平台的包",
+  "en": "This computer cannot build for this platform"
+ },
+ {
+  "source": "游戏照常能玩，只是开头几次进新场景会卡一下（着色器现编，编过的会记住）。请导出诊断反馈给我们，修好后重新出包就能提前编好。",
+  "en": "The game still runs; it just stutters briefly the first few times it reaches a new scene (shaders compile on first use and are remembered). Please export diagnostics and send them to us; after the fix, packaging again prebuilds them."
  }
 ]

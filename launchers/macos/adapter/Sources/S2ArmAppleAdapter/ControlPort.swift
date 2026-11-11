@@ -181,7 +181,7 @@ final class ControlStateCache: @unchecked Sendable {
 ///   作业是独立进程，界面没有任务表也照样有据（s2armctl wait / errors / logs 读的就是这些字段；控制口不应答时 s2armctl 本来就读同一份文件）。
 public enum ControlJournal {
     /// 玩家看得见的作业（同旧启动器 Store.visibleOperations）；查环境、读游戏库这类后台小作业不进。
-    public static let visibleOperations: Set<String> = ["install", "installRemove", "installRestore", "build", "moveGame", "import", "keys", "downloadMetal", "downloadIosPlatform", "launch", "clean",
+    public static let visibleOperations: Set<String> = ["install", "installRemove", "installRestore", "installUpdate", "build", "moveGame", "import", "keys", "downloadMetal", "downloadIosPlatform", "launch", "clean",
                                                         "remove", "delete", "diagnostics", "prepareEngine", "pullDiagnostics", "ipa", "installDotnet", "setup", "spaceFree"]
 
     /// 最近的 limit 条，按开始时间从旧到新。

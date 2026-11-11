@@ -30,6 +30,8 @@ CS = re.compile(r"Directory\.(Enumerate|Get)(Files|Directories|FileSystemEntries
 
 # (文件, 范围（Python 函数名 / shell 行内特征串 / C# 方法外层：*）) → 理由
 ALLOW = {
+    ("pack/img.py", "convert:walk"):
+        "误判：删的是出包目录 pack_dir 里搬进 game.img 后留下的空目录（自下而上），不是 RomFS",
     ("translator/shader_split.py", "main:listdir"):
         "误判：列的是 RomFS 旁边的 glslc_capture/、ue_shaders/ 与输出目录（路径由 RomFS 路径的上一级拼出），不是 RomFS；RomFS 本身经 romfs_list.walk",
     ("tools/nostall.py", "walk:scandir"):

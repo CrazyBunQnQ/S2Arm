@@ -22,6 +22,7 @@
 #   在 维护方工具 的满核槽队列里排（列车优先级 0、预检 5；等待上限按队列长度算），排队超时 → gate-host 的步判红、写明排第几，不在本机重跑。远端工作树名 GATE_REMOTE_NAME（缺省本树目录名；列车给 train，增量编命中）。GATE_CLEAN=1：远端工作树连被忽略的构建产物一起清掉再跑（列车判假红的干净重跑；本机那份由调用方自己给干净树）。
 # 分层（10-30 维护者：合入前门禁只证明「这次改动没弄坏它影响到的东西」，目标中位 ≤5 分钟）：钩子 / tools/gate_ios.sh 文件头「# 门禁层：合入后」（tools/gate_decl.py layer 收；不写 = 合入前）。
 #   GATE_LAYER=pre（列车合入前）= 去掉声明合入后的步；post = 只跑声明合入后的步；不设 = 全跑（自检 11-05 起缺省 pre、显式空值才全跑；老单测同旧行为）。GATE_LIST=1 清单同样按层过滤；
+#   「# 门禁层：合入后（路由命中时合入前也跑）」= 合入后的步，但合入前层里按改动路由选中它时也跑（11-10：安卓支合入前不跑 android/gate.sh、ios 头改动不跑 iOS 编译，一天叠多处 main 红）
 #   被分到另一层没跑的步在结论前列一行「另一层：<步…>」，不算红、不算没跑。
 # 单测结果缓存（只缓存「单测 <名>」步，钩子不缓存）：跑前 tools/test_cache.py key 算键（输入 = 路由覆盖面 ∪ 单测头「# 门禁输入：」+ 工具链指纹），
 #   命中 → 不跑、记绿「（缓存命中）」；没命中照跑，绿了 put、红了不记。缓存目录 ${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/testres；
@@ -74,11 +75,22 @@ for _v in $(compgen -e | grep -E '^(TRAIN_|S2A_TRAIN_)'); do unset "$_v"; done; 
 LAYER=${GATE_LAYER:-}; case $LAYER in ''|pre|post) ;; *) echo "🔴 GATE_LAYER 只认 pre / post（不设 = 全跑）"; exit 1;; esac
 GLY=; if [ -n "$LAYER" ] && [ -f tools/gate_decl.py ]; then GLY=$(python3 tools/gate_decl.py layer) || { echo "🔴 门禁层声明收不齐（tools/gate_decl.py layer 失败）"; exit 1; }; fi
 TCON=${GATE_TEST_CACHE:-1}; TCD=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/testres
+# 门禁台账（11-10 降门禁压力：先量后改）：每步一行 JSON 追加进 GL，记步名、缓存键、在哪台跑、退出码、秒数、排队等令牌秒数、谁起的，不改任何行为。
+#   只记真仓库的本机那份：远端那份（GATE_PLAN）的步由本机这份按「在哪台」记，不重复；门禁步里嵌套的门禁、临时目录里的假仓库（单测）不记。
+#   GATE_LEDGER=<文件> 强制记到该文件，GATE_LEDGER=- 关掉；调用方给 GATE_ROLE（热修 / 列车 / 预跑 / 手工），不给 = 预跑（只认显式：GATE_NO_LOADQ 有人手跑预跑时也设，不能据它推断列车）
+GL=${GATE_LEDGER:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_ledger.jsonl}
+if [ "$GL" = - ]; then GL=
+elif [ -z "${GATE_LEDGER:-}" ]; then case $R in "${TMPDIR:-/tmp}"*|/tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) GL=;; esac; { [ -n "$PLANM" ] || [ -n "${GATE_IN_STEP:-}" ]; } && GL=; fi
+GLROLE=${GATE_ROLE:-预跑}; GLREV=$(git rev-parse --short=12 "${GATE_REV:-HEAD}" 2> /dev/null); GLRUN=$(date +%s)-$$
 OTHER=()   # 分到另一层、本次不跑的步
 inlayer() {   # inlayer <步名>：本次 GATE_LAYER 要不要这一步
   [ -n "$LAYER" ] || return 0
-  local post=pre; awk -F'	' -v n="$1" '$1 == n && $2 == "合入后" { f = 1 } END { exit !f }' < <(printf '%s\n' "$GLY") && post=post
-  [ "$post" = "$LAYER" ]; }
+  local post=pre pf=; awk -F'	' -v n="$1" '$1 == n && $2 == "合入后" { f = 1 } END { exit !f }' < <(printf '%s\n' "$GLY") && post=post
+  [ "$post" = "$LAYER" ] && return 0
+  # 「合入后（路由命中时合入前也跑）」：合入前层里只要按改动路由（RT=1）选中了它就跑——钩子 / iOS 编译只在路由命中时才 add 进来，
+  #   路由表就是各自文件头「# 门禁路由」与 gate_route.py，不另列前缀（11-10：安卓支、ios 头改动合入前不跑对应钩子，一天叠多处 main 红）
+  [ "$LAYER" = pre ] && [ "$post" = post ] && [ "${RT:-0}" = 1 ] || return 1
+  pf=$(awk -F'	' -v n="$1" '$1 == n && $2 == "合入后" { print $3 }' < <(printf '%s\n' "$GLY")); [ "$pf" = 路由 ]; }
 if [ "$TIER" != doc ] && [ -f "$R/tools/toolchain.env" ]; then
   if [ -n "$LINUX_LOCAL" ]; then
     # source 必须在当前 shell，保留 PATH；stderr 原文逐行加前缀，不伪装成步骤红。
@@ -242,7 +254,7 @@ tok_put() { local p=${1%%$'\t'*}; [ -n "$p" ] || return 0; ps -o command= -p "$p
 _sigrc() { [ -f "$L/$1.rc" ] || { echo "$2 $((SECONDS - ${s0:-$SECONDS}))" > "$L/$1.rc"; echo "被信号 $3 停（步自己的进程被停，不是被测命令退出）" >> "$L/$1.log"; }; exit "$2"; }
 LJ=(); job() { ( me=$BASHPID; : > "$L/$1.started"; s0=$SECONDS
   trap "_sigrc '$1' 143 TERM" TERM; trap "_sigrc '$1' 130 INT" INT; trap "_sigrc '$1' 129 HUP" HUP
-  tk=$(tok_get "$me") || { echo "75 0" > "$L/$1.rc"; echo "环境未就绪：拿不到门禁令牌（持锁进程起不来）" > "$L/$1.log"; exit 0; }; trap 'tok_put "$tk"' EXIT
+  tk=$(tok_get "$me") || { echo "75 0" > "$L/$1.rc"; echo "环境未就绪：拿不到门禁令牌（持锁进程起不来）" > "$L/$1.log"; exit 0; }; trap 'tok_put "$tk"' EXIT; echo $((SECONDS - s0)) > "$L/$1.wait"   # .wait = 排队等令牌的秒数（台账用）
   if [ -f "$L/stop" ]; then echo "143 0" > "$L/$1.rc"; exit 0; fi
   export GATE_IN_STEP=1; s0=$SECONDS; timeout "$3" bash -c "$2" > "$L/$1.log" 2>&1 & tp=$!; echo $tp > "$L/$1.tp"; wait $tp; rc=$?; echo "$rc $((SECONDS - s0))" > "$L/$1.rc" ) & LJ+=($!); }   # LJ = 本机步的进程号（先等它们、还 CPU 账，再等 gate-host）   # job <编号> <命令> <上限>：后台跑，写 $L/<编号>.log / .rc；.tp = 该步 timeout 进程号
 # <<< step_par
@@ -353,10 +365,20 @@ FBN=0; if [ -n "${QWHY:-}" ] && [ -z "$OVLD" ] && [ "${GATE_FALLBACK_LOCAL:-1}" 
   FBWHY=$QWHY; QWHY=
 fi
 # >>> show（单测 tests/gate_step_par_test.sh 按标记抽出来测）
+gl_put() {   # gl_put <结果文件> <显示名> <退出码> <秒数>：台账记一行（GL 空 = 不记）；写不进不影响门禁
+  [ -n "${GL:-}" ] || return 0
+  local f=$L/$1 k=- h=本机 w=0 n
+  case $1 in r/*) h=${RHN:-gate-host};; *[!0-9]*) ;; *) k=${TK[$1]:-}; k=${k:--};; esac
+  [ -f "$f.wait" ] && read -r w < "$f.wait"
+  n=$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  mkdir -p "$(dirname "$GL")" 2> /dev/null
+  printf '{"t":%s,"run":"%s","step":"%s","key":"%s","host":"%s","rc":"%s","sec":%s,"wait":%s,"hit":%s,"role":"%s","tier":"%s","layer":"%s","rev":"%s"}\n' \
+    "$(date +%s)" "${GLRUN:-}" "$n" "$k" "$h" "$3" "${4:-0}" "${w:-0}" "$([ -f "$f.hit" ] && echo 1 || echo 0)" "${GLROLE:-}" "${TIER:-}" "${LAYER:-}" "${GLREV:-}" >> "$GL" 2> /dev/null
+  return 0; }
 show() {   # show <行首> <结果文件（$L 下，不带后缀）> <显示名> <上限>：打一行（红时带细节）；返回 0 绿 / 1 红 / 2 没跑完 / 3 这一步自报环境未就绪（退出 75） / 4 被早停
   local f=$L/$2 rc sec last
-  [ -f "$f.rc" ] || { if [ -f "$f.started" ]; then echo "${1}🔴 ${3}：没跑完（无退出码：步已起、被强杀（KILL）或门禁先于它退出）"; else echo "${1}🔴 ${3}：没跑完（无退出码：步没起来）"; fi; return 2; }
-  read -r rc sec < "$f.rc"; last=$(grep -v '^[[:space:]]*$' "$f.log" | grep -av '^\(待宿主证\|已证宿主项\)	' | tail -1 | cut -c1-200)
+  [ -f "$f.rc" ] || { gl_put "$2" "$3" 无 0; if [ -f "$f.started" ]; then echo "${1}🔴 ${3}：没跑完（无退出码：步已起、被强杀（KILL）或门禁先于它退出）"; else echo "${1}🔴 ${3}：没跑完（无退出码：步没起来）"; fi; return 2; }
+  read -r rc sec < "$f.rc"; gl_put "$2" "$3" "$rc" "$sec"; last=$(grep -v '^[[:space:]]*$' "$f.log" | grep -av '^\(待宿主证\|已证宿主项\)	' | tail -1 | cut -c1-200)
   # 宿主项（10-30 维护者：与「待 Mac 证」对称）：步 / 子项在本宿主做不了的项打「待宿主证<TAB>类别<TAB>项」、在具备的宿主上做过且绿打「已证宿主项<TAB>类别<TAB>项」，
   #   不影响本步红绿；这里按「类别<TAB>项<TAB>步名」收进 $L/hostlines，结论里列出（列车凭它核宿主证明，见 tools/train.sh hostproof）
   grep -a '^\(待宿主证\|已证宿主项\)	' "$f.log" 2> /dev/null | awk -F'\t' -v n="$CUR" 'NF >= 3 { print $1 "\t" $2 "\t" $3 "\t" n }' >> "$L/hostlines"

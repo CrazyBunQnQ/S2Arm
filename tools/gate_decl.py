@@ -5,7 +5,7 @@
   local  <步>\t<键>\t<原因>                  钩子头里「# 门禁本机：<键> <原因>」（键 * = 整步本机跑，其余 = 该子项本机另跑）；
                                               tests/*_test.sh 头里「# 门禁本机：<原因>」= 单测 <名> 整步本机；tools/public_repo_scan.py 头里的 = 公开仓扫描
   manual <单测文件>\t<原因>                   任一单测文件头里「门禁手动：<原因>」（# / // / <!-- --> 注释）= 不进门禁、手动跑（tools/test_wired_lint.py 白名单）
-  layer  <步>\t合入后                        钩子 / tools/gate_ios.sh（步名「iOS 全量编译」）/ tests/*_test.sh（步名「单测 <名>」）头里「# 门禁层：合入后」= 列车合入前不跑、合入后跑（tools/gate.sh GATE_LAYER）；
+  layer  <步>\t合入后[\t路由]                钩子 / tools/gate_ios.sh（步名「iOS 全量编译」）/ tests/*_test.sh（步名「单测 <名>」）头里「# 门禁层：合入后」= 列车合入前不跑、合入后跑（tools/gate.sh GATE_LAYER）；
                                               不写 = 合入前；只认「合入前 / 合入后」，写错报红退出 1（10-30 维护者：合入前门禁只证明这次改动没弄坏它影响到的东西）
   inputs <单测文件>\t<目录或通配…>            tests/ 下单测头里「# 门禁输入：<目录或通配…>」（可多行，取并集）= 单测结果缓存（tools/test_cache.py）在路由覆盖面之外还要算进键的输入
 只读每个文件开头 HEAD 行；声明必须写在文件头（注释），不跟业务代码混。"""
@@ -74,7 +74,8 @@ def main():
             if not step: continue
             for k, v in decls(root, f):
                 if k != '层': continue
-                if v not in ('合入前', '合入后'): sys.exit(f'【红】gate_decl：{f} 的「门禁层：{v}」只认 合入前 / 合入后')
+                if v == '合入后（路由命中时合入前也跑）': print(f'{step}\t合入后\t路由'); continue   # 11-10：安卓支 / ios 头改动合入前不跑对应钩子，一天叠多处 main 红
+                if v not in ('合入前', '合入后'): sys.exit(f'【红】gate_decl：{f} 的「门禁层：{v}」只认 合入前 / 合入后 / 合入后（路由命中时合入前也跑）')
                 if v == '合入后': print(f'{step}\t合入后')
     elif mode == 'inputs':
         rows = {}

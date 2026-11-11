@@ -325,7 +325,7 @@ static void fr_capture(const char *name, const tex_t *pt, double period, const i
     if (s2a_vk_front_used && s2a_vk_front_used()) { MLOG("【红】 帧录 %s：本款走 Vulkan 前端（hle_vk.m 自己编码 Metal，不经 NVN 回放层），这一版录不到", name); return; }
     if (!s2a_window_get) { MLOG("【红】 帧录 %s：宿主没有地址窗口接口", name); return; }
     s2a_window_get(&wb, &ws);
-    { pthread_mutex_lock(&g_mu); int sparse = 0; for (int i = 0; i < g_npool; i++) sparse |= pool_host(g_pools[i].lo & ~(uintptr_t)(getpagesize() - 1), g_pools[i].hi) != (g_pools[i].lo & ~(uintptr_t)(getpagesize() - 1)); pthread_mutex_unlock(&g_mu);
+    { pthread_mutex_lock(&g_mu); int sparse = 0; for (int i = 0; i < g_npool; i++) sparse |= g_pools[i].host != g_pools[i].base;   // the pool's host bytes are elsewhere (a far-alias shadow, or one view of it: pool_host) pthread_mutex_unlock(&g_mu);
       if (sparse) MLOG("【红】 帧录 %s：有内存池在远端别名区（影子另址），回放按游戏地址读不到它们的内容", name); }
     mtl_finish_gpu();   // GPU 做完这一帧之前的提交：GPU 私有贴图的内容、事件值都落定
     uint64_t mb = 0, nreg = 0, gb = 0; int skipped = 0;

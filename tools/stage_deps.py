@@ -36,10 +36,16 @@ def _real(repo, name):
     return (repo if name == 'R:.' else os.path.join(repo, name[2:])) if name.startswith('R:') else name
 
 
+def _git(args, **kw):
+    """账本 git 调用不吃工具链 env：坏 / 假 DEVELOPER_DIR 会让 /usr/bin/git 垫片 xcrun 报红。"""
+    env = os.environ.copy(); env.pop('DEVELOPER_DIR', None)
+    return subprocess.run(['git', *args], env=env, **kw)
+
+
 def _listed(repo):
     """仓库里算输入的文件：git 跟踪的 + 未跟踪但没被忽略的（构建产物 / 缓存被 .gitignore 挡掉）；不是 git 仓库 → None（全收）"""
     try:
-        out = subprocess.run(['git', '-C', repo, 'ls-files', '-co', '--exclude-standard', '-z'], capture_output=True, check=True).stdout
+        out = _git(['-C', repo, 'ls-files', '-co', '--exclude-standard', '-z'], capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return None, None
     files = {f for f in out.decode('utf-8', 'surrogateescape').split('\0') if f}
@@ -65,7 +71,7 @@ def _keep(kids, name):
 
 
 def _ignored(repo, rel):
-    return subprocess.run(['git', '-C', repo, 'check-ignore', '-q', '--', rel], capture_output=True).returncode == 0
+    return _git(['-C', repo, 'check-ignore', '-q', '--', rel], capture_output=True).returncode == 0
 
 
 def collect(raw, repo, excl):

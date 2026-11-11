@@ -81,6 +81,22 @@ final class SettingsProviderTests: XCTestCase {
         let mode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
         XCTAssertEqual(mode, 0o600)
     }
+
+    /// 审计 P2-273：写盘失败时内存改回原值（原先内存已是新值、磁盘还是旧的，之后按没存下的值走、下次启动又回到旧的）。
+    ///   设置文件的上级放成普通文件，建目录必失败
+    func testFailedWriteKeepsThePreviousValueInMemory() throws {
+        let box = try Sandbox(); defer { box.remove() }
+        let blocker = box.privateRoot.appendingPathComponent("blocker")
+        try Data("x".utf8).write(to: blocker)
+        let settings = SettingsProvider(client: client(box, FakeRunner()), store: blocker.appendingPathComponent("launch-settings.json"))
+        XCTAssertThrowsError(try settings.setCloudSavesFolder("/tmp/cloud"))
+        XCTAssertNil(settings.cloudSavesFolder)
+        XCTAssertThrowsError(try settings.setAIControl(true))
+        XCTAssertFalse(settings.aiControl)
+        let targetsBefore = settings.exportTargets
+        XCTAssertThrowsError(try settings.setExportTargets(["ios"]))
+        XCTAssertEqual(settings.exportTargets, targetsBefore)
+    }
 }
 
 final class PlayServiceTests: XCTestCase {

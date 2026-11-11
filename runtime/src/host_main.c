@@ -136,6 +136,9 @@ static void switch_program_modules(void) {
 static void load_session_modules(void *unused) {
     (void)unused;
     switch_program_modules();
+#if defined(__APPLE__)
+    { int s2a_guest_file_retry(void); s2a_guest_file_retry(); }   // 起局时空间不够没接上文件后备的，解包完、装模块前再试一次（vawin.c，#483）
+#endif
     load_modules(g_module_dir, (const char **)g_module_names, g_module_count);
     if (g_program_switched >= 0) {   // 多程序合集：模块（含 main.npdm 程序号）换好后，直连图形层的着色器库 / 映射表 / 每款参数换到该序号（graphics/nvn/host_adapt.m）；
         //   没链直连图形层的宿主（安卓、图形单测）按名找不到 = 报红，不假装换了
@@ -200,6 +203,9 @@ static void failed_session(int code) {
     s2a_logcon_flush();
     _exit(EXIT_FAILURE);
 }
+
+// 宿主别处（svc_mem.c 布局判出设备放不下，#446）走同一个初启失败出口：iOS 人手局停提示页，Mac / 自动化局失败退出
+void s2a_init_failed(int code) { failed_session(code); }
 
 // 只由 session.c 在上一局 guest / 服务 / GPU 完整退休后调用。
 int s2a_host_rebuild(void) {
@@ -355,10 +361,10 @@ static int host_run(int argc, char **argv) {
     { int s2a_oodle_tool_on(void), s2a_oodle_tool_needs_sdk(void), s2a_glslc_tool_on(void); int oodle = s2a_oodle_tool_on(); if (oodle || s2a_glslc_tool_on()) {
         if (oodle) { void s2a_oodle_tool_claim_stdout(void); s2a_oodle_tool_claim_stdout(); }   // 应答管道只给解码结果：之后（含 C# 起局）的日志都进 stderr
         int sdk = !oodle || s2a_oodle_tool_needs_sdk();
-        // 有 S2A_InitSession 就走它（同下面正式起局，回 0 / -1）：初始化失败 die 非 0 退出（审计 P1-126：原先调 void 的 S2A_Init，失败只报红、照起游戏主线程、最后退 0）
-        if (sdk) { if (!S2A_InitSession && !S2A_Init) die("【红】%s 工具模式要 C# 服务层（S2A_CS=1 编宿主）：SDK 初始化要连系统服务", oodle ? "LZ5" : "GLSLC");
-                   if (!S2A_InitSession) S2A_Init();
-                   else if (s2a_session_prepare() || S2A_InitSession()) die("【红】%s 工具模式：C# 服务层初始化失败（原因见上面的红行），不起游戏主线程", oodle ? "LZ5" : "GLSLC"); }
+        // 只认 S2A_InitSession（同下面正式起局，回 0 / -1）：初始化失败 die 非 0 退出。没有它就 die，不再退到 void 的 S2A_Init
+        //   （审计 P1-126：void 入口吞异常，失败只报红、照起游戏主线程、最后退 0；现行宿主两个入口都导出，这条退路只在链接结果缺会话符号时走到）
+        if (sdk) { if (!S2A_InitSession) die("【红】%s 工具模式要 C# 服务层的 S2A_InitSession（S2A_CS=1 编宿主）：SDK 初始化要连系统服务", oodle ? "LZ5" : "GLSLC");
+                   if (s2a_session_prepare() || S2A_InitSession()) die("【红】%s 工具模式：C# 服务层初始化失败（原因见上面的红行），不起游戏主线程", oodle ? "LZ5" : "GLSLC"); }
         LOG("出包期工具模式（%s）：%s，直接起游戏主线程", oodle ? (sdk ? "LZ5" : "Oodle") : "GLSLC", sdk ? "C# 服务层已起、不起前端" : "跳过 C# 初始化");
         struct s2a_guest_main_args tool_args = {.stack_top = g_main_stack_top, .argc = g_argc, .argv = g_argv};
         pthread_t tth; pthread_attr_t tat; pthread_attr_init(&tat); pthread_attr_setstacksize(&tat, 8 << 20);
@@ -371,7 +377,8 @@ static int host_run(int argc, char **argv) {
         if (s2a_session_prepare()) failed_session(S2A_INIT_FAIL_E_SESSION_CTRL);
         if (S2A_InitSession()) failed_session(s2a_init_fail_service_code(s2a_launch_ctx_get() ? s2a_launch_ctx_get()->game_data : getenv("S2A_GAME_DATA")));   // 资源包缺 main.npdm 单独归 game_files_missing
     }
-    else if (S2A_Init) S2A_Init();
+    // 只链上老的 void S2A_Init、没有 S2A_InitSession：它把初始化异常报红后吞掉，照常起游戏会在后面别处崩；同工具模式，停下说清楚（审计 P2-268）
+    else if (S2A_Init) die("【红】C# 服务层只导出了 S2A_Init、没有 S2A_InitSession：初始化失败报不出来，不起游戏（宿主与服务层版本不配套，重新出包）");
     else LOG("S2A_Init：没链 C#（原生层单独构建），进 C# 的系统调用一律报红");
     // 只有直连（11-07 拆通用模式）：包里没有本宿主口径的直连库（没导完、旧版本出的包、设备跑不了直连）就停在这里报「游戏文件缺失」，
     //   iOS 提示页带「复制诊断」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）

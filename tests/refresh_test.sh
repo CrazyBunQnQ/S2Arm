@@ -139,6 +139,11 @@ mkdir -p "$(cd -P $T/roots/acnh@现行 && pwd)/romfs/base" && : > "$(cd -P $T/ro
 o=$(FAKE_FAIL=rewrite R); r=$?
 ck "⑬e 解码器款改写红 → 退 1、抽取与直连库都没跑（rc=${r}）" '[ $r = 1 ] && ! grep -q "^extract 起\|^direct 起" $T/log'
 rm -f "$(cd -P $T/roots/acnh@现行 && pwd)/romfs/base/gameresources.resources"
+# ⑬f Trinity 包（#470 0100F43008C44000：arc/data.trpfs，Oodle）同样是解码器款：抽取等改写结束才开工（原先不在名单里，抽取抢在改写前、离线 0 支）
+mkdir -p "$(cd -P $T/roots/acnh@现行 && pwd)/romfs/arc" && : > "$(cd -P $T/roots/acnh@现行 && pwd)/romfs/arc/data.trpfs"
+o=$(FAKE_RW_SLEEP=2 R); r=$?
+ck "⑬f 解码器款（.trpfs）：抽取等改写结束才开工（rc=${r}）" '[ $r = 0 ] && ! lt $(t extract 起) $(t rewrite 止)'
+rm -f "$(cd -P $T/roots/acnh@现行 && pwd)/romfs/arc/data.trpfs"
 o=$(FAKE_FAIL=rewrite R); r=$?
 ck "⑬b 改写红 → rc=${r}（期望 1）、红行点名 rewrite、不跑能力表" '[ $r = 1 ] && grep -q "刷新停在 rewrite 阶段" <<< "$o" && [ -z "$(t caps 起)" ]'
 o=$(FAKE_FAIL=romfsidx R); r=$?

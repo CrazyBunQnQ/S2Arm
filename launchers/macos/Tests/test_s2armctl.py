@@ -186,13 +186,39 @@ class WaitTests(unittest.TestCase):
             call.assert_called_once_with("POST", path, body)
 
     def test_install_passes_team_and_device_only_when_given(self):
-        for argv, body in [(["install", "G"], {"gameId": "G"}),
-                           (["install", "G", "--team", "ABCDE12345"], {"gameId": "G", "teamId": "ABCDE12345"}),
-                           (["install", "G", "--device", "测试 iPhone", "--team", "ABCDE12345"],
+        for argv, body in [(["install", "G", "--no-wait"], {"gameId": "G"}),
+                           (["install", "G", "--team", "ABCDE12345", "--no-wait"], {"gameId": "G", "teamId": "ABCDE12345"}),
+                           (["install", "G", "--device", "测试 iPhone", "--team", "ABCDE12345", "--no-wait"],
                             {"gameId": "G", "teamId": "ABCDE12345", "device": "测试 iPhone"})]:
             with mock.patch.object(ctl, "call", return_value={"ok": True}) as call, mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), mock.patch("builtins.print"):
                 ctl.main()
             call.assert_called_once_with("POST", "/install", body)
+
+    def run_install(self, after):
+        """install 默认等这次作业结束：发命令前已有一个上次成功的装机任务 old，之后出现的才是这次的"""
+        old = {"id": "old", "gameId": "G", "operation": "install", "state": "completed", "started": 1, "ended": 2}
+        states = [{"tasks": [old]}, {"ok": True}, {"tasks": [old], "error": "", "cachedAt": 0}] + [{"tasks": [old] + after, "error": "", "cachedAt": 0}] * 3
+        output = io.StringIO(); now = [0]
+        with mock.patch.object(ctl, "call", side_effect=lambda *a, **k: states.pop(0) if states else {"tasks": [old] + after, "error": "", "cachedAt": 0}), \
+                mock.patch.object(ctl.time, "time", side_effect=lambda: now[0]), mock.patch.object(ctl.time, "sleep", side_effect=lambda x: now.__setitem__(0, now[0] + x)), \
+                mock.patch.object(ctl, "errors") as errors, mock.patch.object(ctl.sys, "argv", ["s2armctl", "install", "G", "--timeout", "30"]), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as result:
+            ctl.main()
+        return result.exception.code, errors.call_count, output.getvalue()
+
+    def test_install_failure_exits_1_with_error_details(self):
+        code, errors, out = self.run_install([{"id": "new", "gameId": "G", "operation": "install", "state": "failed", "started": 5, "ended": 6, "message": "手机上有几款是在别的电脑上装的"}])
+        self.assertEqual((code, errors), (1, 1))   # 11-10：原先打 {"ok": true} 就退 0
+        self.assertIn("failed", out)
+
+    def test_install_success_exits_0(self):
+        code, errors, _ = self.run_install([{"id": "new", "gameId": "G", "operation": "install", "state": "completed", "started": 5, "ended": 6}])
+        self.assertEqual((code, errors), (0, 0))
+
+    def test_install_does_not_take_last_runs_result(self):
+        # 这次的任务还没出现：只有上一次成功的 old，不能据此退 0，要等到超时
+        code, _, _ = self.run_install([])
+        self.assertIsInstance(code, str); self.assertIn("没结束", code)
 
     def test_cloud_commands_reach_the_app(self):
         # iCloud 存档：cloud-folder 给绝对路径、不给 = 关闭（空串）；cloud-sync 带游戏号
@@ -485,7 +511,7 @@ class LaunchArgsTests(unittest.TestCase):
         """--accept-dropped 才带 acceptDropped（玩家同意别的电脑装的款这次带不上）；不给就不带，作业层停下报 container_would_drop"""
         posted = []
         with mock.patch.object(ctl, "call", side_effect=lambda m, p, b=None, **kw: posted.append((p, b)) or {"ok": True}):
-            for argv in (["install", "0100535012974000"], ["install", "0100535012974000", "--accept-dropped"], ["uninstall", "0100535012974000", "--accept-dropped"]):
+            for argv in (["install", "0100535012974000", "--no-wait"], ["install", "0100535012974000", "--accept-dropped", "--no-wait"], ["uninstall", "0100535012974000", "--accept-dropped"]):
                 with mock.patch.object(sys, "argv", ["s2armctl", *argv]):
                     ctl.main()
         self.assertEqual(posted, [("/install", {"gameId": "0100535012974000"}), ("/install", {"gameId": "0100535012974000", "acceptDropped": True}),
@@ -561,6 +587,43 @@ class ErrorsCommandTests(unittest.TestCase):
         output = self._run_errors(state)
         self.assertIn("disk_full", output)
         self.assertNotIn("Failed stage", output)
+
+class BatchCommandTests(unittest.TestCase):
+    """s2armctl batch（批量出包，v0.2.4）：命令行组成 POST /batch 的请求；轮询 GET /state 的 batch，出完打印每款结果，有失败退 1。期望手写"""
+    def run_batch(self, argv, final_summary):
+        calls = []
+        done = {"running": False, "summary": final_summary, "paused": None,
+                "items": [{"gameId": "0100A", "name": "甲", "platforms": ["mac", "iphone"], "results": {"mac": {"state": "completed"}, "iphone": {"state": "completed"}}}]}
+        def call(method, path, body=None, **kw):
+            calls.append((method, path, body))
+            return {"ok": True, "skipped": []} if path == "/batch" else {"batch": done}
+        out = io.StringIO()
+        with mock.patch.object(ctl, "call", call), mock.patch.object(ctl.time, "sleep", lambda s: None), contextlib.redirect_stdout(out), \
+             self.assertRaises(SystemExit) as caught:
+            ctl.batch(argv)
+        return calls, caught.exception.code, out.getvalue()
+
+    def test_request_and_exit_codes(self):
+        calls, code, text = self.run_batch(["0100a:mac,iphone", "0100b", "--location", "/tmp/包"], {"total": 2, "completed": 2, "failed": 0})
+        self.assertEqual(calls[0], ("POST", "/batch", {"games": [{"gameId": "0100A", "platforms": ["mac", "iphone"]},
+                                                                 {"gameId": "0100B", "platforms": ["iphone"]}], "location": "/tmp/包"}))
+        self.assertEqual(code, 0)
+        self.assertIn("甲：mac completed；iphone completed", text)
+        _, code, _ = self.run_batch(["0100a"], {"total": 1, "completed": 0, "failed": 1})
+        self.assertEqual(code, 1)
+
+    def test_not_started_exits_without_polling(self):   # 审计 P1-166：控制口说没开始（一款都不能出）→ 立刻退非 0，不轮询、不读上一批
+        calls = []
+        def call(method, path, body=None, **kw):
+            calls.append(path); return {"ok": False, "error": "没有能出的游戏", "skipped": [{"gameId": "0100A", "reason": "keys"}]}
+        out = io.StringIO()
+        with mock.patch.object(ctl, "call", call), mock.patch.object(ctl.time, "sleep", lambda s: None), contextlib.redirect_stdout(out), \
+             self.assertRaises(SystemExit) as caught:
+            ctl.batch(["0100a"])
+        self.assertEqual(calls, ["/batch"])
+        self.assertIn("没有能出的游戏", str(caught.exception.code))
+        self.assertIn("跳过 0100A：keys", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

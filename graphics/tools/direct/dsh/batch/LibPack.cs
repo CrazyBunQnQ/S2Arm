@@ -413,7 +413,8 @@ static class LibPack
     /// → null 成；否则返回 sys.exit 的文本。log 收 Python 那段 print 的各行（不含之前的 library stamp 行）
     /// 与 Python 唯一的有意不同：publish = ios 而 ios 为 null 时 Python 在 _pub.names() 上 AttributeError 崩掉，这里照常返回红行
     /// </summary>
-    public static string Publish(IReadOnlyDictionary<string, byte[]> mac, IReadOnlyDictionary<string, byte[]> ios, bool noMac, string publish, string iosOut, string chain, TextWriter log)
+    /// sourcesDone：ps_inputs 表写完（Mac 侧源码 *.metal 最后一次被读）、打容器之前调，整份出库借它放掉源码那份（v0.2.4 出包空间），所以 ps_inputs 在打容器之前做
+    public static string Publish(IReadOnlyDictionary<string, byte[]> mac, IReadOnlyDictionary<string, byte[]> ios, bool noMac, string publish, string iosOut, string chain, TextWriter log, Action sourcesDone = null)
     {
         var noLib = NoLibKeys(publish == "mac" ? mac : ios ?? mac);
         var bad = CheckNames(mac.Keys, ios?.Keys, noMac, log, noLib);
@@ -421,16 +422,18 @@ static class LibPack
         if (!Sdk.ContainsKey(publish)) bad.Add($"S2A_DIRECT_PUBLISH 只认 ios / mac，给了 {publish}");
         var pub = publish == "mac" ? mac : ios;
         if (bad.Count == 0) bad = SdkCheckItems(Sorted(pub.Keys).Where(n => n.EndsWith(".json", StringComparison.Ordinal) && LIBFILE.IsMatch(n)).Select(n => (n, pub[n])), publish, $"{publish} 库");   // 只核 json：先筛再读（同 SdkCheckItems 循环里的条件；原先连 8 万多个指向批库的 _b.metallib 一起读盘）
-        if (bad.Count == 0) log.WriteLine($"[直连库] 发布 {publish} 库：反射全部 -sdk {Sdk[publish]}");
-        string line = null;
-        if (bad.Count == 0) (bad, line) = PackFiles(pub.Keys.Where(IsLibFile).ToList(), n => pub.TryGetValue(n, out var b) ? b : null, iosOut, chain);
         if (bad.Count > 0) return string.Join("\n", bad.Take(20).Select(b => $"[RED] {b}"));
-        log.WriteLine(line);
+        log.WriteLine($"[直连库] 发布 {publish} 库：反射全部 -sdk {Sdk[publish]}");
         string top = Path.GetDirectoryName(iosOut);
         var items = Sorted(mac.Keys.Where(n => n.EndsWith("_b.json", StringComparison.Ordinal)))
             .Select(n => (n[..^"_b.json".Length], Utf8.GetString(mac[n]), mac.TryGetValue(n[..^5] + ".metal", out var t) ? Utf8.GetString(t) : null));
         int nps;
         try { nps = PsInputsWrite(items, Path.Combine(top, "ps_inputs.tsv")); } catch (Exit e) { return e.Message; }
+        sourcesDone?.Invoke();
+        string line;
+        (bad, line) = PackFiles(pub.Keys.Where(IsLibFile).ToList(), n => pub.TryGetValue(n, out var b) ? b : null, iosOut, chain);
+        if (bad.Count > 0) return string.Join("\n", bad.Take(20).Select(b => $"[RED] {b}"));
+        log.WriteLine(line);
         log.WriteLine($"ps_inputs.tsv: {nps} pixel shaders");
         // keys.tsv = 出成的键：有 _b.metallib 的，加按设计无库、发布侧有 _b.json 的（gs_slice）。宿主 gfxmode.c 拿它判「直连就绪」（要覆盖通用模式见过的全部键），漏了这类键就判不就绪
         var built = new HashSet<string>(pub.Keys.Where(n => KEYSLIB.IsMatch(n)).Select(n => n[..^"_b.metallib".Length]));

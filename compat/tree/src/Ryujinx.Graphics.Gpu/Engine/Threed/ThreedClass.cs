@@ -203,6 +203,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             _stateUpdater.ForceShaderUpdate();
         }
 
+        // S2A（#468）：见 StateUpdater.S2AClearFragmentOutputMap。
+        public void S2AClearFragmentOutputMap()
+        {
+            _stateUpdater.S2AClearFragmentOutputMap();
+        }
+
         /// <summary>
         /// Create any syncs from WaitForIdle command that are currently pending.
         /// </summary>

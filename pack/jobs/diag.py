@@ -68,6 +68,14 @@ def iml_hint(c, probe, app):
                      code="iml_missing", severity="warning")
 
 
+def game_ids(c):
+    """这台电脑游戏库里的游戏号（试拉各款解包日志用）；库没建好 / 读不了给空"""
+    try:
+        return sorted({str(g.get("id", "")).upper() for g in c.catalog().get("games", []) if re.fullmatch(r"[0-9A-Fa-f]{16}", str(g.get("id", "")))})
+    except Exception:   # 诊断拉取不因游戏库读不了而失败
+        return []
+
+
 def pull(c):
     c.begin("找已连接的 iPhone / iPad", 1, 3)
     rc, data, err = devicectl(c, "list", "devices")
@@ -107,6 +115,21 @@ def pull(c):
                     shutil.rmtree(target)  # Only this failed copy in the new exclusive directory.
                 else:
                     target.unlink(missing_ok=True)
+            # 多款容器每款自己的解包日志 Documents/games/<游戏号>/unpack.log（#457：手机 host.log 写「资源包收推送：失败（见 unpack.log）」，
+            #   原先只拉容器根上的 unpack.log，这一份没拉回、定不了因）。按这台电脑游戏库里的游戏号逐个试拉，机上没有的跳过；
+            #   不列整个 games/ 目录：devicectl 列目录是递归的，资源包十万个文件
+            for gid in game_ids(c):
+                target = dest / "games" / gid / "unpack.log"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                rc, _, _ = devicectl(c, "device", "copy", "from", "--device", dev, "--domain-type", "appDataContainer",
+                                     "--domain-identifier", bid, "--source", f"Documents/games/{gid}/unpack.log", "--destination", str(target), timeout=120)
+                if rc == 0 and target.is_file():
+                    got += 1
+                else:
+                    target.unlink(missing_ok=True)
+                    target.parent.rmdir()   # 本次新建的空目录
+            if (dest / "games").is_dir() and not any((dest / "games").iterdir()):
+                (dest / "games").rmdir()
             if got:
                 pulled.append(dict(app=app.get("name") or bid, bundle=bid, files=got, path=str(dest)))
                 iml_hint(c, dest / "diag" / "iml_probe.json", app.get("name") or bid)

@@ -1,9 +1,9 @@
 {
  "schema": 1,
- "id": "2026-11-10-unofficial-site",
+ "id": "2026-11-10-official-site",
  "text": {
-  "zh-Hans": "s2arm.com 不是 S2Arm 的官方网站：它擅自使用 S2Arm 名称并挂出捐款链接。S2Arm 免费开源，从不接受捐赠；第三方网站的下载内容无法鉴别是否被改动或植入后门，请只从官方渠道获取。",
-  "en": "s2arm.com is NOT the official S2Arm website: it uses the S2Arm name without permission and solicits donations. S2Arm is free and open source and never accepts donations. We cannot verify whether anything downloaded from third-party sites has been modified or contains a backdoor; get S2Arm only from the official channels."
+  "zh-Hans": "好消息：s2arm.com 已正式成为 S2Arm 官方网站。S2Arm 免费开源，从不接受捐赠；请只从 s2arm.com 或 GitHub 仓库获取 S2Arm。",
+  "en": "Good news: s2arm.com is now the official S2Arm website. S2Arm is free and open source and never accepts donations; get S2Arm only from s2arm.com or the GitHub repository."
  },
  "url": "https://github.com/jhaizhou-ops/S2Arm#readme"
 }

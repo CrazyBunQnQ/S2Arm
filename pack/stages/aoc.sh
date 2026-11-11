@@ -82,7 +82,10 @@ echo "$L" | awk -F'\t' -v t="$TID" 'toupper($4) == t {f=1} END {exit !f}' || { e
 # 工具只按内容进键：shasum 带文件名（完整检出 / 家目录路径）时换目录键就变，只取哈希列（同 pack/stage_rewrite.sh 10-23 那处）
 # 原件身份（pack/srcs.sh src_ident：大小 修改时间 ctime inode；审计 P1-54：src_ids 那行只有路径 / 大小 / 修改时间，保住这三样换了 DLC 原件照用旧的）。不读内容：原件可能软链在机械盘上
 SI=$(f=(); while IFS=$'\t' read -r x _; do [ -n "$x" ] && f+=("$x"); done <<< "$L"; [ ${#f[@]} = 0 ] || src_ident "${f[@]}") || { echo "【红】$G 读不出追加内容原件的身份（stat）"; exit 1; }
-K=$( { echo "$L"; echo "$SI"; for t in "$SRC_N.dll" "$SRC_N"; do [ -f "$t" ] && shasum -a 256 < "$t"; done; xxd -s 0x40 -l 16 -p "$CUR/exefs/main"; } | shasum -a 256 | cut -c1-16)
+# main 构建号用 od 读（P2-278：不依赖 xxd；输出与原 xxd -p 逐字节相同，键不变）
+BID=$(od -An -v -tx1 -j 64 -N 16 "$CUR/exefs/main" | tr -d ' \n')
+[[ "$BID" =~ ^[0-9a-f]{32}$ ]] || { echo "【红】$G 读不出 exefs/main 的构建号（0x40 起 16 字节，读到「${BID}」）"; exit 1; }
+K=$( { echo "$L"; echo "$SI"; for t in "$SRC_N.dll" "$SRC_N"; do [ -f "$t" ] && shasum -a 256 < "$t"; done; printf '%s\n' "$BID"; } | shasum -a 256 | cut -c1-16)
 KB=$K; K=$(stage_deps_key "$CUR" aoc "$KB" "$SELF") || exit 1
 root_stage_done "$CUR" aoc "$K" && { echo "🟢 $G 现行已是追加内容 ${K}，跳过"; exit 0; }
 fs=(); while IFS=$'\t' read -r f _; do fs+=("$f"); done <<< "$L"

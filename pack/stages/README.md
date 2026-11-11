@@ -94,7 +94,7 @@ K  = sha256("KR KT")[:16]
 
 ```
 已做 = 现行产物根里有 ctl/control.nacp
-TAG  = "nacp-" + xxd -s 0x40 -l 4 -p exefs/main      # main 构建号，与程序同版本
+TAG  = "nacp-" + exefs/main 0x40 起 4 字节十六进制（od 读）   # main 构建号，与程序同版本
 ```
 
 - **为什么没有阶段键**：原实现就没有（`pack/stage_keys.sh` 注释写明「元数据不算」）。判断只有「产物在不在」，
@@ -111,7 +111,7 @@ selected = { 程序号 == 现行产物根程序号 的包 } ∪ { 程序号 = "-
 K_aoc = sha256(
            逐行 "绝对路径 TAB 字节数 TAB mtime TAB 程序号"     # 即 pack/srcs.sh 的 src_ids 输出
          + sha256(nx_unpack.dll) + sha256(nx_unpack)
-         + xxd -s 0x40 -l 16 exefs/main                     # main 构建号（16 字节）
+         + exefs/main 0x40 起 16 字节十六进制（od 读）      # main 构建号（16 字节）
         )[:16]
 C = $S2A_AOC_CACHE/<款>-<K_aoc>/                             # 解好的 DLC 全机共享，各产物根克隆
 ```

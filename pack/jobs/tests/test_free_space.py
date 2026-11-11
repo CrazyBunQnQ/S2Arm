@@ -93,6 +93,38 @@ class CloudFolder(unittest.TestCase):
         self.assertEqual([p["code"] for p in got], ["library_bad_format"]); self.assertIn("NTFS", got[0]["message"])
 
 
+class LocationSlack(unittest.TestCase):
+    """#444：存放位置所在卷会让出包多占空间时提示（只提示不拦），原因说对。期望按规则手写：分配单元 ≥ 64 KB → cluster（先判）；格式不是推荐格式 → format"""
+    def test_rule(self):
+        K = 1024
+        for fmt, cluster, system, want in [
+                ("apfs", 4 * K, "Darwin", None),          # Mac 推荐格式、4 KB 块
+                ("exfat", 512 * K, "Darwin", "cluster"),  # #444 玩家的外置盘：大簇优先
+                ("exfat", 4 * K, "Darwin", "format"),     # 小簇 exFAT：不能克隆，多一份拷贝，不是「多占数倍」
+                ("hfs", 4 * K, "Darwin", "format"),
+                ("apfs", 64 * K, "Darwin", "cluster"),    # 分配单元到 64 KB 就提示
+                ("apfs", 64 * K - 1, "Darwin", None),
+                ("ntfs", 4 * K, "Windows", None),
+                ("refs", 64 * K, "Windows", "cluster"),   # 推荐格式但大簇
+                ("ntfs", 2048 * K, "Windows", "cluster"), # NTFS 大簇
+                ("fat32", 32 * K, "Windows", "format"),
+                ("exfat", 128 * K, "Windows", "cluster"),
+                ("", 0, "Darwin", None),                  # 都读不到：不提示
+                ("", 512 * K, "Darwin", "cluster"),       # 格式读不到、簇大
+                ("APFS", 0, "Darwin", None)]:             # 大写也认、簇读不到
+            with self.subTest(fmt=fmt, cluster=cluster, system=system):
+                self.assertEqual(libloc.slack_reason(fmt, cluster, system=system), want)
+
+    def test_location_slack_fields(self):
+        probes = {"/外接盘/库": ("exfat", 512 << 10), "/小簇盘/库": ("exfat", 4096)}
+        with patch.object(library, "volume_format", side_effect=lambda p: probes.get(str(p), ("apfs", 4096))[0]), \
+             patch.object(library, "volume_cluster", side_effect=lambda p: probes.get(str(p), ("apfs", 4096))[1]), \
+             patch.object(library.os, "name", "posix"):
+            self.assertEqual(library.location_slack(Path("/外接盘/库")), dict(format="exfat", clusterBytes=512 << 10, slackWarning=True, slackReason="cluster"))
+            self.assertEqual(library.location_slack(Path("/小簇盘/库")), dict(format="exfat", clusterBytes=4096, slackWarning=True, slackReason="format"))
+            self.assertEqual(library.location_slack(Path("/本机盘/S2Arm")), dict(format="apfs", clusterBytes=4096, slackWarning=False, slackReason=None))
+
+
 class LibraryGate(JobCase):
     def test_setup_rejects_cloud_before_writing(self):
         lib = self.root / "云盘里的库"; self.c.library = lib

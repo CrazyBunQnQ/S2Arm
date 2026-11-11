@@ -111,70 +111,8 @@ const s2a_nvn_profile *s2a_nvn_prof(void) {
     return &g_prof;
 }
 
-// ---------- SDK 主版本（照上游 loader.c dm_sdk_major：sdk 模块只读数据里的 "NintendoSDK_nnSdk-<主版本>_…"）----------
-int dm_sdk_major(void) {
-    static int major = -1;
-    if (major >= 0) return major;
-    major = 0;
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
-        const char *b = (const char *)g_mod[i].base + g_mod[i].ro_off, *e = (const char *)g_mod[i].base + g_mod[i].key_page_off;
-        for (const char *p = b; (p = memmem(p, (size_t)(e - p), "_nnSdk-", 7)); p += 7)
-            if (p - b >= 11 && !strncasecmp(p - 11, "NintendoSDK", 11)) {
-                // Switch 2 的 SDK 先写变体名：「NintendoSdk_nnSdk-Generic_20_5_25」（Pokopia；同 the reference port loader.c）
-                const char *v = p + 7; while (v < e && ((*v >= 'A' && *v <= 'Z') || (*v >= 'a' && *v <= 'z'))) v++;
-                if (v > p + 7 && v < e && *v == '_') v++; else v = p + 7;
-                if (v < e && *v >= '0' && *v <= '9') { major = atoi(v); LOG("直连：SDK nnSdk-%.20s（主版本 %d）", p + 7, major); break; }
-            }
-    }
-    if (!major) LOG("【红】直连：sdk 模块里没有 SDK 版本串，按新 SDK 处理");
-    return major;
-}
-
-// ---------- 游戏自带 NVN 驱动报的设备信息（sdk 模块里驱动 nvnDeviceGetInteger 的立即数，nvn_drvscan.h）：API 版本、GPU 代码版本范围 ----------
-// sdk 里驱动 nvnDeviceGetInteger 跳表的各条目立即数（nvn_drvscan.h；−1 = 该条目不是直接返回的常量），装载后第一次用到时扫一次
-static int32_t g_drv_items[256]; static int g_drv_n = -1;
-static int drv_items(void) {
-    if (g_drv_n >= 0) return g_drv_n;
-    g_drv_n = 0;
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk") && g_mod[i].base) {
-        g_drv_n = nvn_drv_items_scan(g_mod[i].base, (size_t)g_mod[i].text_end, g_mod[i].size, g_drv_items, 256);
-        if (!g_drv_n) LOG("直连：sdk 里没认出驱动的设备信息表，按 SDK 版本 / 宿主表报");
-        else LOG("直连：游戏自带驱动报 NVN API %d.%d、GPU 代码版本 %d.%d–%d.%d（sdk 驱动常量，%d 项）", g_drv_items[0], g_drv_items[1],
-                 g_drv_n > 0x31 ? g_drv_items[0x2F] : -1, g_drv_n > 0x31 ? g_drv_items[0x31] : -1, g_drv_n > 0x31 ? g_drv_items[0x2E] : -1, g_drv_n > 0x31 ? g_drv_items[0x30] : -1, g_drv_n);
-    }
-    return g_drv_n;
-}
-int dm_nvn_driver_api(int *major, int *minor) {
-    if (drv_items() < 2) { *major = *minor = 0; return 0; }
-    *major = g_drv_items[0]; *minor = g_drv_items[1]; return 1;
-}
-int dm_nvn_driver_item(int w, int *out) {
-    if (w < 0 || w >= drv_items() || w >= 256 || g_drv_items[w] < 0) return 0;
-    *out = g_drv_items[w]; return 1;
-}
-// 同一驱动 nvnTextureGetNvRmSurfaceNVX 给 RGBA8 的 NvColorFormat（nvn_drvscan.h；0 = 没认出）：直连层按它把宿主的 NvColorFormat 换成游戏这一代的编码（游戏的 VIC 库只认自己的）。
-//   GOT 槽在装载后已重定位成绝对地址，扫描器按模块基址换回偏移
-uint64_t dm_nvn_driver_nvrm_rgba8(void) {
-    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk") && g_mod[i].base)
-        return nvn_drv_nvrm_rgba8_scan(g_mod[i].base, (size_t)g_mod[i].text_end, g_mod[i].size, (uint64_t)(uintptr_t)g_mod[i].base);
-    return 0;
-}
-
-// ---------- Switch 2：游戏 sdk 里 NVN2 驱动 nvnDeviceGetInteger 的常量项（nvn2.c 用；移植自 the reference port loader.c dm_sdk_nvn2_item，MIT）----------
-// 驱动的 switch 先把主版本装进 w0（mov w0, #231），再按字节表跳：adr L / adrp + add T / ldrb / add, lsl #2 / br，前面有 cmp wN, #最后一项。常量项是 mov w0, #v; b。
-//   和 Switch 1 驱动的形状不同（nvn_drvscan.h：movz w0, #主版本 紧挨 br），所以单写一份。返回 1 并填 *out = 该项是常量；0 = 该项读别的（多数项查表或读 GPU 描述）或没认出 switch
-int dm_nvn2_driver_item(unsigned item, int *out) {
-    static nvn2_drv d; static int found = -1;
-    if (found < 0) {
-        found = 0;
-        for (int i = 0; i < g_nmod && !found; i++) if (!strcmp(g_mod[i].name, "sdk") && g_mod[i].base) {
-            found = nvn2_drv_scan(g_mod[i].base, (size_t)g_mod[i].ro_off, (size_t)g_mod[i].ro_off, (size_t)g_mod[i].key_page_off, &d);
-            if (found) LOG("直连：Switch 2 sdk 里认出 NVN2 驱动的设备信息跳表（sdk+%#zx，%u 项）", d.at, d.last + 1);
-        }
-        if (nvn2_on() && !found) LOG("【红】直连：sdk 里没认出 NVN2 驱动 nvnDeviceGetInteger 的跳表，设备值按已知最新报");
-    }
-    return found && nvn2_drv_item(&d, item, out);
-}
+// ---------- SDK 主版本、游戏自带 NVN / NVN2 驱动报的设备信息：与安卓共用一份（gfx/nvn/nvn_drvinfo.inc）----------
+#include "gfx/nvn/nvn_drvinfo.inc"
 
 // ---------- 杂项宿主名字 ----------
 uint64_t g_t0_ns;
@@ -233,7 +171,14 @@ void s2a_direct_out_size(int *w, int *h) { *w = g_out_w; *h = g_out_h; }
 static int fb_readback(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FB_READBACK"); v = e && !strcmp(e, "1"); } return v; }
 #if TARGET_OS_IPHONE
 UIView *s2a_ios_root_view(void) __attribute__((weak_import));
+// 游戏区（ios，#301 提供；没有就整视图）：只对手机根视图有意义，外接屏窗口的视图一律用整个视图（11-11 合入 #300 时与外接屏 present_view 一起接）
 CGRect s2a_ios_game_area(void) __attribute__((weak_import));
+static CGRect game_area(UIView *v) {
+    CGRect a = (s2a_ios_game_area && s2a_ios_root_view && v == s2a_ios_root_view()) ? s2a_ios_game_area() : v.bounds;
+    return CGRectIsEmpty(a) ? v.bounds : a; }
+// 出图层该挂的视图（ios/extdisplay.m，主线程）：外接显示器接着 = 外接屏窗口的视图，否则根视图。没有这个符号的壳一律根视图
+UIView *s2a_ios_present_view(void) __attribute__((weak_import));
+static UIView *present_view(void) { return s2a_ios_present_view ? s2a_ios_present_view() : s2a_ios_root_view ? s2a_ios_root_view() : nil; }
 int s2a_screen_w(void); int s2a_screen_h(void); int s2a_widen_game(void); int s2a_widen_full(void); int s2a_screen_reaspect(void);   // runtime/src/widen.c
 int s2a_nvn_reaspect_ok(void);   // graphics/nvn/widen_glue.inc：NVN 直连的宽屏核心在跑（能运行中换屏；Vulkan / GL 层的贴图建时定宽，换不了）
 static int out_wide(void) {   // 出的是宽图：第二层，或直连第三层整套放宽（屏幕比 16:9 宽时核心才放宽，s2a_widen_init 回 OFF 时出的仍是 16:9）
@@ -260,8 +205,7 @@ CGRect s2a_direct_out_rect(void) { return g_layer ? g_layer.frame : CGRectZero; 
 //   Vulkan / GL 直连（贴图建时定宽）照旧：游戏仍按起局比例出图，新视图比例差 > 1% 时按出图比例居中留黑、记一行
 static void layout_layer(UIView *v, CAMetalLayer *l) {
     CGFloat s = v.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale; l.contentsScale = s;
-    CGRect b = s2a_ios_game_area ? s2a_ios_game_area() : v.bounds; double a = g_out_a;
-    if (CGRectIsEmpty(b)) b = v.bounds;
+    CGRect b = game_area(v); double a = g_out_a;
     if (b.size.width <= 0 || b.size.height <= 0 || !(a > 0)) return;
     // 等比居中；出图比例与视图比例差 < 1% 时铺满视图（10-29：宽屏开着时出图比例来自取整后的屏幕宽，如 2346 / 1080 = 2.1722 对屏幕 2.1727，
     //   旧写法层比视图窄零点几个点，右侧露一条 ≤ 1 像素的黑缝；同 the reference port present_viewport 的 1% 容差）
@@ -276,17 +220,31 @@ static void layout_layer(UIView *v, CAMetalLayer *l) {
     [CATransaction commit];
     g_out_w = (int)l.drawableSize.width; g_out_h = (int)l.drawableSize.height;
 }
-void s2a_direct_relayout(void) {   // App 壳视图控制器 viewDidLayoutSubviews 调（主线程）；没挂出图层（通用模式 / 还没起）不做
-    UIView *v = g_layer && s2a_ios_root_view ? s2a_ios_root_view() : nil; if (!v) return;
+static int g_relayout_due;   // 主线程：后台期间出图层挪回了根视图，欠一次重摆（回前台补，见 front_metal_layer 登记的通知）
+void s2a_direct_relayout(void) {   // App 壳视图控制器 viewDidLayoutSubviews、外接屏接上 / 断开（ios/extdisplay.m）调（主线程）；没挂出图层（通用模式 / 还没起）不做
+    UIView *v = g_layer ? present_view() : nil; if (!v) return;
+    // 外接显示器接上 / 断开：出图层跟着换到外接屏窗口的视图 / 回根视图，照旧垫在最底层；比例与可画尺寸由下面同一条重摆路按新视图算
+    int ext = s2a_ios_root_view && v != s2a_ios_root_view(), moved = g_layer.superlayer != v.layer;
+    if (moved) {
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        [g_layer removeFromSuperlayer]; [v.layer insertSublayer:g_layer atIndex:0];
+        [CATransaction commit];
+        LOG("直连：出图层挪到%s（App 状态 %ld，视图所在场景状态 %ld）", ext ? "外接屏" : "手机屏",
+            (long)UIApplication.sharedApplication.applicationState, (long)v.window.windowScene.activationState);
+    }
     // 在后台不认布局变化（11-02 维护者 Duo 丝之歌：进后台后 iOS 截多任务快照，临时把视图摆成 466×678 点的竖条，宿主当成运行中换屏 1350 → 1318 → 1350、
     //   宽屏核心按新比例重建加高目标；回前台那一刻多一次重建）：后台不出图也不提交，快照尺寸不是玩家的屏幕。回前台视图恢复原尺寸，出图层本来没动
-    if (UIApplication.sharedApplication.applicationState == UIApplicationStateBackground) return;
-    CGRect area = s2a_ios_game_area ? s2a_ios_game_area() : v.bounds;
-    if (CGRectIsEmpty(area)) area = v.bounds;
+    //   只管根视图：外接屏窗口的视图不被快照改尺寸。刚挪回根视图的层还按外接屏摆着：根视图所在场景在前台就当场重摆，否则记欠一次、回前台补
+    //   （pf_relayout_wait，11-10 iPhone 18 Pro 局中拔显示器：外接屏场景断开回调里 App 状态读到 2 = 后台，根视图所在场景状态 0 = 前台活跃、没有进后台通知）
+    UIWindowScene *vs = v.window.windowScene;
+    int app_bg = UIApplication.sharedApplication.applicationState == UIApplicationStateBackground;
+    int scene_fg = vs && (vs.activationState == UISceneActivationStateForegroundActive || vs.activationState == UISceneActivationStateForegroundInactive);
+    if (pf_relayout_wait(ext, app_bg, moved, scene_fg)) { if (moved) g_relayout_due = 1; return; }
+    CGRect area = game_area(v);
     CGSize z = area.size; if (z.width <= 0 || z.height <= 0) return;
     double a0 = g_out_a; int re = s2a_nvn_reaspect_ok() && s2a_screen_reaspect(); if (re) g_out_a = out_aspect();   // 先换出图比例再摆层
     CGSize d0 = g_layer.drawableSize; layout_layer(v, g_layer); CGSize d1 = g_layer.drawableSize;
-    if (d0.width == d1.width && d0.height == d1.height && !re) return;
+    if (d0.width == d1.width && d0.height == d1.height && !re && !moved) return;
     double va = z.width / z.height;
     LOG("直连：屏幕尺寸变了，出图层重摆为 %.0fx%.0f 像素（视图 %.0fx%.0f 点，比例 %.3f；出图比例 %.3f → %.3f%s）", d1.width, d1.height, z.width, z.height, va, a0, g_out_a,
         re ? "，宽屏核心下一个渲染遍按新比例出图" : "");
@@ -297,7 +255,7 @@ void *front_metal_layer(void) {
     dispatch_once(&once, ^{
         if (!s2a_ios_root_view) { LOG("【红】直连：没有 App 壳根视图（s2a_ios_root_view），无出图层"); return; }
         void (^mk)(void) = ^{
-            UIView *v = s2a_ios_root_view(); if (!v) return;
+            UIView *v = present_view(); if (!v) return;
             CAMetalLayer *l = [CAMetalLayer layer];
             l.device = MTLCreateSystemDefaultDevice(); l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.framebufferOnly = !fb_readback(); l.opaque = YES;
             g_out_a = out_aspect();   // 10-24 真机：宽屏开着仍按 16:9 挂，2.17 的画面被塞进 16:9 区域、左右露黑；窄屏同理按 1920:屏高
@@ -306,6 +264,9 @@ void *front_metal_layer(void) {
             //   怪猎测试设备1 冷首启预热 64 秒，屏上只有手柄（手柄与开发浮层靠 zPosition 压过它），玩家对着黑屏点中了看不见的「先开始玩」
             [v.layer insertSublayer:l atIndex:0];
             g_layer = l;
+            if (v != s2a_ios_root_view()) LOG("直连：出图层挂在外接屏（下一行的「根视图」尺寸是外接屏窗口的视图）");
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *n) { (void)n; if (g_relayout_due) { g_relayout_due = 0; s2a_direct_relayout(); } }];   // 补后台期间欠的重摆
         };
         if (NSThread.isMainThread) mk(); else dispatch_sync(dispatch_get_main_queue(), mk);
         if (g_layer) LOG("直连：出图层已挂到根视图 %.0fx%.0f 像素（宽高比 %.3f，居中；宽屏第二层%s）", g_layer.drawableSize.width, g_layer.drawableSize.height,
@@ -510,7 +471,13 @@ int s2a_direct_device_ok(void) {
     return ok;
 }
 static _Atomic int g_suspended;
-void s2a_direct_suspend(int on) { if (s2a_gfx_mode() == S2A_GFX_DIRECT) { atomic_store(&g_suspended, on); dm_gfx_suspend(on); } }
+void s2a_direct_suspend_gate(int on) {
+    if (s2a_gfx_mode() == S2A_GFX_DIRECT) { atomic_store(&g_suspended, on); dm_gfx_suspend(on); }
+}
+void s2a_direct_suspend(int on) {
+    s2a_direct_suspend_gate(on);
+    if (on && s2a_gfx_mode() == S2A_GFX_DIRECT) dm_gfx_suspend_drain();
+}
 int s2a_direct_guest_start_hold(void) {
     if (s2a_gfx_mode() != S2A_GFX_DIRECT) return 0;
     atomic_store(&g_suspended, 1);

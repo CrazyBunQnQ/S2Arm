@@ -46,6 +46,23 @@ const char *nvn_vk_first_draw_first_error(void) { return g_break_fail ? g_break_
 
 static void put(uint8_t *stream, size_t *at, uint32_t op, uint32_t size);
 
+// B2T / T2B 按生产记录写（hle_nvn.c REC_SNAP）：载荷后 SNAP_OFF(p_copy_b2t) 处一份 tex_t 快照，
+// 回放只从快照取 NVN 格式 / 目标 / 层数。返回整条长度。
+static uint32_t put_copy_b2t(uint8_t *buf, size_t *at, uint32_t op, const p_copy_b2t *cp, const tex_t *snap) {
+    const size_t off = (sizeof(p_copy_b2t) + 7) & ~(size_t)7;
+    uint32_t size = (uint32_t)((sizeof(op_hdr) + off + sizeof(tex_t) + 7) & ~7u);
+    put(buf, at, op, size);
+    memcpy(buf + *at - size + sizeof(op_hdr), cp, sizeof *cp);
+    memcpy(buf + *at - size + sizeof(op_hdr) + off, snap, sizeof *snap);
+    return size;
+}
+static tex_t rgba8_snap(uint32_t w, uint32_t h, uint32_t levels, int target, uint32_t layers) {
+    tex_t t; memset(&t, 0, sizeof t);
+    t.magic = 0x00584554; t.d.format = NVN_FORMAT_RGBA8; t.d.target = target;
+    t.d.width = w; t.d.height = h; t.d.depth = layers; t.d.levels = levels;
+    return t;
+}
+
 // SET_RT 按紧凑记录写（nvn_obj.h p_set_rt_c）：头 + 指针 + 视图 + 快照区；快照区留零，指针直接指向测试的对象
 static void put_set_rt(uint8_t *buf, size_t *at, const p_set_rt *rt) {
     uint32_t size = (uint32_t)((sizeof(op_hdr) + set_rt_size(rt) + 7) & ~7u);
@@ -1258,13 +1275,12 @@ int main(int argc, char **argv) {
             clear.mask = 0xF; clear.value_type = CLEAR_TEX_FLOAT;
             clear.c.f[0] = 1.0f; clear.c.f[1] = 0.0f; clear.c.f[2] = 0.0f; clear.c.f[3] = 1.0f;
             memcpy(stream + 8, &clear, sizeof clear);
-            uint32_t cp_size = (uint32_t)((sizeof(op_hdr) + sizeof(p_copy_b2t) + 7) & ~7u);
-            put(stream, &at2, OP_COPY_T2B, cp_size);
             p_copy_b2t cp; memset(&cp, 0, sizeof cp);
             cp.src = 0x800; cp.tex = (const tex_t *)(uintptr_t)0x9;
             cp.r = (NVNcopyRegion){0, 0, 0, 8, 8, 1};
             cp.row_stride = 64; cp.image_stride = 512;
-            memcpy(stream + at2 - cp_size + 8, &cp, sizeof cp);
+            const tex_t snap9 = rgba8_snap(8, 8, 1, NVN_TEXTURE_TARGET_2D, 1);
+            put_copy_b2t(stream, &at2, OP_COPY_T2B, &cp, &snap9);
             put(stream, &at2, OP_END, 8);
             struct s2a_replay_texture ttab[1] = {{(const void *)(uintptr_t)0x9, t_img, VK_FORMAT_R8G8B8A8_UNORM, 8, 8, 1, 0, 0, 0}};
             rc = s2a_record_replay(&device, stream, stream + at2, &memory, ttab, 1, NULL, 0, NULL, 0, &result);
@@ -1277,9 +1293,8 @@ int main(int argc, char **argv) {
                 // 改 guest 为绿，B2T 回纹理。
                 guest.bytes[0x800] = 0; guest.bytes[0x801] = 255;
                 size_t at3 = 0; memset(stream, 0, sizeof stream);
-                put(stream, &at3, OP_COPY_B2T, cp_size);
                 cp.src = 0x800;
-                memcpy(stream + 8, &cp, sizeof cp);
+                put_copy_b2t(stream, &at3, OP_COPY_B2T, &cp, &snap9);
                 put(stream, &at3, OP_END, 8);
                 rc = s2a_record_replay(&device, stream, stream + at3, &memory, ttab, 1, NULL, 0, NULL, 0, &result);
                 uint8_t px[256];
@@ -1311,13 +1326,12 @@ int main(int argc, char **argv) {
             clear.mask = 0xF; clear.value_type = CLEAR_TEX_FLOAT;
             clear.c.f[0] = 1.0f; clear.c.f[1] = 0.0f; clear.c.f[2] = 0.0f; clear.c.f[3] = 1.0f;
             memcpy(stream + 8, &clear, sizeof clear);
-            uint32_t cp_size = (uint32_t)((sizeof(op_hdr) + sizeof(p_copy_b2t) + 7) & ~7u);
-            put(stream, &at4, OP_COPY_T2B, cp_size);
             p_copy_b2t cp; memset(&cp, 0, sizeof cp);
             cp.src = 0xC00; cp.tex = (const tex_t *)(uintptr_t)0xA;
             cp.r = (NVNcopyRegion){0, 0, 0, 8, 8, 1};
             cp.row_stride = 64; cp.image_stride = 512;
-            memcpy(stream + at4 - cp_size + 8, &cp, sizeof cp);
+            const tex_t snapA = rgba8_snap(8, 8, 1, NVN_TEXTURE_TARGET_2D, 1);
+            put_copy_b2t(stream, &at4, OP_COPY_T2B, &cp, &snapA);
             put(stream, &at4, OP_END, 8);
             struct s2a_replay_texture tab[1] = {{(const void *)(uintptr_t)0xA, im, VK_FORMAT_R8G8B8A8_UNORM, 8, 8, 1, 0, 0, 0}};
             rc = s2a_record_replay(&device, stream, stream + at4, &memory, tab, 1, NULL, 0, NULL, 0, &result);
@@ -1893,6 +1907,70 @@ int main(int argc, char **argv) {
                                    p0[0], p0[1], p0[2], p0[3], p1[0], p1[1], p1[2], p1[3]);
             } else {
                 printf("INFO colour attachment view: mip1/layer1=red, mip0/layer0=green (sentinel kept)\n");
+            }
+        }
+        vkDestroyImage(device.device, vimg, NULL); if (vmem) vkFreeMemory(device.device, vmem, NULL);
+    }
+
+    // ---- B2T / T2B 按视图子资源（#48）：视图 base_level 1 + region z 1 写进 mip1/layer1，带行尾填充；
+    //      mip0/layer0 哨兵保留，T2B 读回同一子资源且不覆写 guest 行尾填充 ----
+    {
+        VkDeviceMemory vmem = VK_NULL_HANDLE;
+        VkImage vimg = make_image_layers(&device, VK_FORMAT_R8G8B8A8_UNORM, 2, 2,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            VK_IMAGE_USAGE_TRANSFER_DST_BIT, &vmem);
+        tex_t vt = rgba8_snap(8, 8, 2, NVN_TEXTURE_TARGET_2D_ARRAY, 2);
+        vt.serial = 96;
+        if (!vimg) { failures++; printf("FAIL b2t view image creation\n"); }
+        else {
+            struct s2a_replay_texture vtex[1] = { {&vt, vimg, VK_FORMAT_R8G8B8A8_UNORM, 8, 8, 1, 96, 2, 2} };
+            uint8_t stream[4096], p0[256], p1[64];
+            size_t at = 0;
+            // mip0/layer0 哨兵绿（同时把图像带进 GENERAL）。
+            uint32_t clear_size = (uint32_t)((sizeof(op_hdr) + sizeof(p_clear_color) + 7) & ~7u);
+            p_set_rt rt; memset(&rt, 0, sizeof rt); rt.n = 1; rt.color[0] = &vt; rt.has_cview[0] = 1;
+            rt.cview[0].set_levels = 1; rt.cview[0].nlevels = 1; rt.cview[0].set_layers = 1; rt.cview[0].nlayers = 1;
+            p_clear_color cl; memset(&cl, 0, sizeof cl); cl.index = 0; cl.mask = 0xF;
+            cl.rgba[1] = 1.0f; cl.rgba[3] = 1.0f;
+            put_set_rt(stream, &at, &rt);
+            put(stream, &at, OP_CLEAR_COLOR, clear_size);
+            memcpy(stream + at - clear_size + sizeof(op_hdr), &cl, sizeof cl);
+            // mip1/layer1 先清蓝：B2T 必须整块改写成 guest 的红。
+            rt.cview[0].base_level = 1; rt.cview[0].min_layer = 1;
+            cl.rgba[1] = 0.0f; cl.rgba[2] = 1.0f;
+            put_set_rt(stream, &at, &rt);
+            put(stream, &at, OP_CLEAR_COLOR, clear_size);
+            memcpy(stream + at - clear_size + sizeof(op_hdr), &cl, sizeof cl);
+            // guest 0xE00：4x4 红，行距 20（4 字节填充 0x5A）。
+            for (int y = 0; y < 4; y++) for (int x = 0; x < 20; x++)
+                guest.bytes[0xE00 + y * 20 + x] = x < 16 ? (uint8_t)((x & 3) == 0 || (x & 3) == 3 ? 255 : 0) : 0x5A;
+            p_copy_b2t cp; memset(&cp, 0, sizeof cp);
+            cp.src = 0xE00; cp.tex = &vt; cp.has_view = 1;
+            cp.view.set_levels = 1; cp.view.base_level = 1; cp.view.nlevels = 0;   // 游戏写法：级数 0 = 到末级
+            cp.r = (NVNcopyRegion){0, 0, 1, 4, 4, 1}; cp.row_stride = 20;
+            put_copy_b2t(stream, &at, OP_COPY_B2T, &cp, &vt);
+            // T2B 读回 mip1/layer1 到 0xF00，行距 20，填充预置 0x33 必须保留。
+            memset(guest.bytes + 0xF00, 0x33, 80);
+            cp.src = 0xF00;
+            put_copy_b2t(stream, &at, OP_COPY_T2B, &cp, &vt);
+            put(stream, &at, OP_END, 8);
+            rc = s2a_record_replay(&device, stream, stream + at, &memory, vtex, 1, NULL, 0, NULL, 0, &result);
+            if (rc) { failures++; printf("FAIL b2t view replay rc=%d %s\n", rc, result.why); }
+            else if (readback_aspect(&device, vimg, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 8, 8, 4, p0, sizeof p0) ||
+                     readback_aspect(&device, vimg, VK_IMAGE_ASPECT_COLOR_BIT, 1, 1, 4, 4, 4, p1, sizeof p1)) {
+                failures++; printf("FAIL b2t view readback\n");
+            } else {
+                int bad = memcmp(p0, (const uint8_t[4]){0, 255, 0, 255}, 4) != 0;
+                for (int i = 0; i < 16; i++) bad |= memcmp(p1 + i * 4, (const uint8_t[4]){255, 0, 0, 255}, 4) != 0;
+                int pad = 0, rows = 0;
+                for (int y = 0; y < 4; y++) {
+                    for (int x = 16; x < 20; x++) pad += guest.bytes[0xF00 + y * 20 + x] != 0x33;
+                    rows += !memcmp(guest.bytes + 0xF00 + y * 20, guest.bytes + 0xE00 + y * 20, 16);
+                }
+                if (bad || pad || rows != 4) {
+                    failures++; printf("FAIL b2t view: mip0/layer0=%u,%u,%u,%u mip1/layer1[0]=%u,%u,%u,%u pad=%d rows=%d\n",
+                                       p0[0], p0[1], p0[2], p0[3], p1[0], p1[1], p1[2], p1[3], pad, rows);
+                } else printf("INFO b2t/t2b view: mip1/layer1=red (16/16), mip0/layer0=green, t2b rows=4 pad kept\n");
             }
         }
         vkDestroyImage(device.device, vimg, NULL); if (vmem) vkFreeMemory(device.device, vmem, NULL);

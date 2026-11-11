@@ -45,7 +45,7 @@ namespace S2A.Services.Tests
             }
 
             int OutObj(Reply r) => *(int*)r.Data;
-            string first, later;
+            string first, later, negWords = "未跑";
 
             try
             {
@@ -111,6 +111,9 @@ namespace S2A.Services.Tests
                 first = Drain();
                 Thread.Sleep(1500);
                 later = Drain();
+                // 审计 P2-255：SetUserWordInfo 词数为负，照常回 ReleasedUserWordInfo（0xB = 11），不在回包前抛异常
+                try { Push(103, Bytes(0x6u, -1)); negWords = Drain(); }
+                catch (Exception e) { negWords = "抛异常：" + e.GetType().Name; }
             }
             catch (InvalidOperationException e)
             {
@@ -125,6 +128,7 @@ namespace S2A.Services.Tests
 
             Check("内嵌键盘 Calc 0x15（Initialize | Appear）当批应答：不夹 DecidedEnter", "0@0 2@3 1@3", first);
             Check("内嵌键盘出现半秒后：先报改字 ChangedString（Shown），再 DecidedEnter → 回 Initialized；名字按最长 4 截断", "2@3 5@4「Play」 1@4 1@1", later);
+            Check("词表词数为负（审计 P2-255）：照常回 ReleasedUserWordInfo", "True", (negWords.Contains("11@")).ToString() + (negWords.Contains("11@") ? "" : "（实得 " + negWords + "）"));
             Check("内嵌键盘交回文本补齐到最短：数字「0」最短 2 / 最长 3、「Player」最短 8", "00 / PlayerPlayer",
                 $"{Ryujinx.HLE.HOS.Applets.SoftwareKeyboardApplet.FitLength("0", 2, 3)} / {Ryujinx.HLE.HOS.Applets.SoftwareKeyboardApplet.FitLength("Player", 8, 0)}");
         }

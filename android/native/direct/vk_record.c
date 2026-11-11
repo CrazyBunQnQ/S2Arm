@@ -2,6 +2,7 @@
 #include "nvn_obj.h"
 #include "nvn_vk_texcache.h"   // A3：对象身份判据 / serial 状态（墓碑）查询；弱符号，宿主合同可替身
 #include "t2t_plan.h"
+#include "buffer_texture_plan.h"
 #include "nvn2_cmd.h"   // DM_PRIM_MESH_TASKS（NVN2 任务 / 网格绘制）
 #pragma weak nvn_ga2ca
 // A3：texcache 是资源状态的唯一归属；宿主单测单独编本 TU 时这两个符号为空（不分类，保持原失败路径）。
@@ -307,7 +308,7 @@ void s2a_record_compute_note(const struct s2a_compute_diagnostic *d,
     if (g_compute.trace && g_compute.trace_lines < 64) { g_compute.trace_lines++; trace=1; }
     pthread_mutex_unlock(&g_compute_mu);
     if (trace) {
-        static const char *source_names[]={"unknown","offline","private","live","miss"};
+        static const char *source_names[]={"unknown","offline","private","live","miss","cached"};
         static const char *outcome_names[]={"build_failed","unsubmitted","completed","completion_unknown","copyback_failed"};
         const char *outcome_name = (unsigned)outcome < sizeof outcome_names/sizeof outcome_names[0] ? outcome_names[outcome] : "build_failed";
         char identity[65] = "unavailable";
@@ -330,10 +331,11 @@ int s2a_record_compute_session_end(void) {
         for(int j=0;j<n;j++) if(entry[j]=='\n' || entry[j]=='\r') entry[j]=' ';
         memcpy(reasons+used,entry,(size_t)n+1); used+=(size_t)n;
     }
-    __android_log_print(ANDROID_LOG_INFO,"S2Arm","compute session: session=%llu generation=%llu dispatches=%llu offline=%llu private=%llu live=%llu miss=%llu unknown_source=%llu submitted=%llu completed=%llu completion_unknown=%llu unsubmitted=%llu build_failed=%llu copyback_failed=%llu reason_overflow=%llu stale=%llu reason_log_omitted=%u%s",
+    __android_log_print(ANDROID_LOG_INFO,"S2Arm","compute session: session=%llu generation=%llu dispatches=%llu offline=%llu private=%llu live=%llu miss=%llu cached=%llu unknown_source=%llu submitted=%llu completed=%llu completion_unknown=%llu unsubmitted=%llu build_failed=%llu copyback_failed=%llu reason_overflow=%llu stale=%llu reason_log_omitted=%u%s",
         (unsigned long long)stats.session,(unsigned long long)stats.generation,(unsigned long long)stats.dispatches,
         (unsigned long long)stats.sources[S2A_COMPUTE_OFFLINE],(unsigned long long)stats.sources[S2A_COMPUTE_PRIVATE],
         (unsigned long long)stats.sources[S2A_COMPUTE_LIVE],(unsigned long long)stats.sources[S2A_COMPUTE_MISS],
+        (unsigned long long)stats.sources[S2A_COMPUTE_CACHED],
         (unsigned long long)stats.sources[S2A_COMPUTE_UNKNOWN],(unsigned long long)stats.submitted,(unsigned long long)stats.completed,
         (unsigned long long)stats.unknown_completion,(unsigned long long)stats.unsubmitted,(unsigned long long)stats.build_failed,
         (unsigned long long)stats.copyback_failed,(unsigned long long)stats.reason_overflow,(unsigned long long)stats.stale_events,omitted,reasons);
@@ -657,10 +659,14 @@ static int submit(struct s2a_vk_device *d, VkCommandBuffer cmd, const struct rec
         // 模块不在或开关关都跳过一次分支判断，不计时也不记账（量的成本不默认付）。
         extern void nvn_vk_frame_log_fence_wait(uint64_t) __attribute__((weak));
         extern int nvn_vk_frame_log_on(void) __attribute__((weak));
+        extern void nvn_vk_frame_tsv_fence_wait(uint64_t) __attribute__((weak));
+        extern int nvn_vk_frame_tsv_on(void) __attribute__((weak));
         const int fl = nvn_vk_frame_log_on && nvn_vk_frame_log_on();
-        uint64_t wt0 = fl ? rec_now_ns() : 0;
+        const int ft = nvn_vk_frame_tsv_on && nvn_vk_frame_tsv_on();
+        uint64_t wt0 = (fl || ft) ? rec_now_ns() : 0;
         rc = vkWaitForFences(d->device, 1, &fence, VK_TRUE, 5000000000ull);
         if (fl) nvn_vk_frame_log_fence_wait(rec_now_ns() - wt0);
+        if (ft) nvn_vk_frame_tsv_fence_wait(rec_now_ns() - wt0);
     }
     if (rc != VK_SUCCESS) {
         // 提交成功但没拿到完成证明：fence/命令缓冲/辅助资源都不能释放或复用。
@@ -1263,66 +1269,87 @@ static int gpu_copy_texture_plan(struct s2a_vk_device *d, const struct s2a_repla
     return submit(d, cmd, NULL) == REC_SUBMIT_COMPLETED ? 0 : -1;
 }
 
-static int copy_image_buffer(struct s2a_vk_device *d, const struct s2a_replay_texture *tex,
-                             uint64_t guest, uint32_t row_stride, uint32_t image_stride,
-                             const struct s2a_record_memory *mem, int to_guest) {
-    if (!tex || !tex->image || tex->width == 0 || tex->height == 0) return -1;
-    if (row_stride == 0) row_stride = tex->width * 4;
-    if (image_stride == 0) image_stride = row_stride * tex->height;
-    if (row_stride < tex->width * 4 || image_stride < row_stride * tex->height) return -1;
+static VkImageMemoryBarrier bt_image_barrier(VkImage image, const struct s2a_bt_dependency *dep) {
+    VkImageMemoryBarrier b = {0};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.srcAccessMask = dep->src_access; b.dstAccessMask = dep->dst_access;
+    b.oldLayout = (VkImageLayout)dep->old_layout; b.newLayout = (VkImageLayout)dep->new_layout;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange = (VkImageSubresourceRange){dep->aspect, dep->mip, 1, dep->base_layer, dep->layer_count};
+    return b;
+}
+
+// OP_COPY_B2T / OP_COPY_T2B 按 buffer_texture_plan 执行：guest 只读/写计划给出的块行（行尾填充与
+// 层尾不碰），staging 紧排，一条 VkBufferImageCopy 覆盖全部层/深度片；前后各一条图像依赖。
+static int copy_buffer_texture(struct s2a_vk_device *d, VkImage image, const struct s2a_bt_plan *p,
+                               const struct s2a_record_memory *mem) {
+    if (!image || !p || !p->staging_bytes) return -1;
+    const int to_guest = p->direction == S2A_BT_TO_BUFFER;
+    const uint32_t nrows = p->rows * p->slices;
+    const int tight = p->guest_row_pitch == p->row_bytes && p->image_stride == p->row_bytes * p->rows;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     void *mapped = NULL;
-    if (create_visible(d, image_stride, &buffer, &memory, &mapped)) return -1;
-    if (!to_guest && mem->read(mem->opaque, guest, mapped, image_stride) != 0) {
-        destroy_visible(d, buffer, memory, mapped);
-        return -1;
-    }
-    VkCommandBuffer cmd = begin_command(d);
-    if (!cmd) { destroy_visible(d, buffer, memory, mapped); return -1; }
-    VkBufferImageCopy regions[4096];
-    uint32_t region_count = 0;
-    if (row_stride == tex->width * 4 && image_stride == row_stride * tex->height) {
-        VkBufferImageCopy region = {0};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = (VkExtent3D){tex->width, tex->height, 1};
-        regions[region_count++] = region;
-    } else {
-        if (tex->height > 4096) { rec_free_command(d, cmd); destroy_visible(d, buffer, memory, mapped); return -1; }
-        for (uint32_t y = 0; y < tex->height; y++) {
-            VkBufferImageCopy region = {0};
-            region.bufferOffset = (VkDeviceSize)y * row_stride;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = (VkOffset3D){0, (int32_t)y, 0};
-            region.imageExtent = (VkExtent3D){tex->width, 1, 1};
-            regions[region_count++] = region;
+    if (create_visible(d, p->staging_bytes, &buffer, &memory, &mapped)) return -1;
+    if (!to_guest) {
+        if (tight) {
+            if (mem->read(mem->opaque, p->guest_address, mapped, (size_t)p->staging_bytes) != 0) goto fail_staging;
+        } else {
+            for (uint32_t row = 0; row < nrows; row++) {
+                struct s2a_bt_span span;
+                if (s2a_buffer_texture_row(p, row, &span) ||
+                    mem->read(mem->opaque, span.guest_address, (uint8_t *)mapped + span.staging_offset,
+                              (size_t)span.bytes) != 0) goto fail_staging;
+            }
         }
     }
+    VkCommandBuffer cmd = begin_command(d);
+    if (!cmd) goto fail_staging;
+    VkImageMemoryBarrier before = bt_image_barrier(image, &p->image_before);
+    vkCmdPipelineBarrier(cmd, p->image_before.src_stage, p->image_before.dst_stage, 0, 0, NULL, 0, NULL, 1, &before);
+    VkBufferImageCopy region = {0};
+    region.imageSubresource = (VkImageSubresourceLayers){p->aspect, p->mip, p->base_layer, p->layer_count};
+    region.imageOffset = (VkOffset3D){(int32_t)p->x, (int32_t)p->y, (int32_t)p->z};
+    region.imageExtent = (VkExtent3D){p->width, p->height, p->depth};
     if (to_guest)
-        vkCmdCopyImageToBuffer(cmd, tex->image, VK_IMAGE_LAYOUT_GENERAL, buffer, region_count, regions);
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
     else
-        vkCmdCopyBufferToImage(cmd, buffer, tex->image, VK_IMAGE_LAYOUT_GENERAL, region_count, regions);
-    VkBufferMemoryBarrier barrier = {0};
-    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    barrier.srcAccessMask = to_guest ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = to_guest ? VK_ACCESS_HOST_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.buffer = buffer; barrier.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         to_guest ? VK_PIPELINE_STAGE_HOST_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, NULL, 1, &barrier, 0, NULL);
+        vkCmdCopyBufferToImage(cmd, buffer, image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    VkImageMemoryBarrier after = bt_image_barrier(image, &p->image_after);
+    vkCmdPipelineBarrier(cmd, p->image_after.src_stage, p->image_after.dst_stage, 0, 0, NULL, 0, NULL, 1, &after);
+    if (to_guest) {
+        VkBufferMemoryBarrier host = {0};
+        host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        host.srcQueueFamilyIndex = host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        host.buffer = buffer; host.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1, &host, 0, NULL);
+    }
     struct rec_keep keep;
     memset(&keep, 0, sizeof keep);
     keep.buf[0] = buffer; keep.mem[0] = memory; keep.nbuf = 1;
     int sr = submit(d, cmd, &keep);
     if (sr == REC_SUBMIT_INCOMPLETE) return -1;   // 完成未知：staging 已归保留账本，不能读回/释放
     int rc = sr == REC_SUBMIT_COMPLETED ? 0 : -1;
-    if (rc == 0 && to_guest && mem->write(mem->opaque, guest, mapped, image_stride) != 0) rc = -1;
+    if (rc == 0 && to_guest) {
+        if (tight) {
+            if (mem->write(mem->opaque, p->guest_address, mapped, (size_t)p->staging_bytes) != 0) rc = -1;
+        } else {
+            for (uint32_t row = 0; rc == 0 && row < nrows; row++) {
+                struct s2a_bt_span span;
+                if (s2a_buffer_texture_row(p, row, &span) ||
+                    mem->write(mem->opaque, span.guest_address, (const uint8_t *)mapped + span.staging_offset,
+                               (size_t)span.bytes) != 0) rc = -1;
+            }
+        }
+    }
     destroy_visible(d, buffer, memory, mapped);
     return rc;
+fail_staging:
+    destroy_visible(d, buffer, memory, mapped);
+    return -1;
 }
 
 static int gpu_copy(struct s2a_vk_device *d, uint64_t src, uint64_t dst, uint64_t bytes,
@@ -1729,6 +1756,13 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
             }
             extern void s2a_vk_adapter_mark_written(VkImage image) __attribute__((weak));
             if (s2a_vk_adapter_mark_written) s2a_vk_adapter_mark_written(texture->image);
+            {
+                /* C4a 首用证据：这个颜色目标的内容在本帧重新起过（iOS rt_fresh）。
+                   弱绑定：后端实现挂在 nvn_vk_draw.c，无实现时啥都不发生。 */
+                extern void nvn_vk_fu_rt_fresh(uint64_t serial) __attribute__((weak));
+                if (nvn_vk_fu_rt_fresh && S->rt_snap_ok[clear.index])
+                    nvn_vk_fu_rt_fresh(S->rt_snap[clear.index].serial);
+            }
             if (clear_st) {
                 atomic_fetch_add(&g_clear_ns, rec_now_ns() - clear_t0);
                 atomic_fetch_add(&g_clear_n, 1);
@@ -1746,7 +1780,6 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
             // NVN 的 BindProgram 按阶段绑定：本次调用的掩码只覆盖要改的阶段，未置位的阶段
             // 保留先前绑定。这里按阶段合并：每个被本次掩码覆盖的阶段，取本程序该阶段 sd[]
             // 的 key；空程序则解绑该阶段。不能只记本次调用的掩码，否则会丢掉更早的绑定。
-            S->bound_program = (const void *)program.prog;
             for (int st = 0; st < 5; st++) {
                 if (!((program.stages >> st) & 1)) continue;
                 int found = -1;
@@ -1761,6 +1794,13 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
                     memcpy(S->bound_keys[st], program.keys[found], 8);
                     S->bound_stage_present |= (uint8_t)(1u << st);
                 }
+            }
+            // 图形程序身份同样按阶段归属（Metal state_op：stages & 0x1f 才换 S.prog）：只绑 CS 的调用
+            // 不动它；空程序只解绑本次掩码里的阶段，还有图形阶段在绑时保留原身份（各阶段键已在上面合并）。
+            // 旧写法每次都用本次 prog 覆盖，游戏先绑 VS/FS 再绑 CS（或空程序解绑别的阶段）后，
+            // 下一笔 draw 拿到 CS 程序或空指针（真机：「draw: no device/program」后 abort）。
+            if (!(program.stages & (1u << 5)) || (program.stages & 0x1f)) {
+                if (program.prog || !S->bound_stage_present) S->bound_program = (const void *)program.prog;
             }
             // CS has independent ownership: a later graphics bind must not replace it.
             if (program.stages & (1u << 5)) {
@@ -1869,6 +1909,7 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
                     if (S->rt_snap_ok[i]) {
                         ds.rt[i].obj_magic = S->rt_snap[i].magic;
                         ds.rt[i].obj_serial = S->rt_snap[i].serial;
+                        ds.rt[i].storage = (uint64_t)(uintptr_t)S->rt_snap[i].mem;
                     }
                     if (S->rt_has_view[i] && S->rt_view[i].set_format) ds.rt[i].view_format = S->rt_view[i].format;
                     // 编译请求只缺 VkFormat 时还有权威的 NVN 格式：优先视图覆盖格式，否则对象格式。
@@ -1886,6 +1927,7 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
                 }
                 if (S->rt_depth_snap_ok) {
                     ds.depth_key = (uint64_t)(uintptr_t)&S->rt_depth_snap;
+                    ds.depth_storage = (uint64_t)(uintptr_t)S->rt_depth_snap.mem;
                     ds.has_depth = 1;
                     ds.has_dview = S->rt_has_dview;
                     if (S->rt_has_dview) ds.dview = S->rt_dview;
@@ -2082,16 +2124,60 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
             if (header.size < sizeof(op_hdr) + sizeof copy)
                 return fail(result, S2A_RECORD_INVALID, header.op, "buffer/texture copy payload too small");
             memcpy(&copy, payload, sizeof copy);
-            if (copy.flags || copy.has_view || copy.r.xoffset || copy.r.yoffset || copy.r.zoffset)
-                return fail(result, S2A_RECORD_UNSUPPORTED, header.op,
-                            "buffer/texture copy with view/flags/offset is not wired yet");
             const struct s2a_replay_texture *tex = find_texture(textures, texture_count, copy.tex);
             if (!tex) return fail(result, S2A_RECORD_MEMORY, header.op,
                 "buffer/texture copy target is not resolvable (refusing to fake success)");
-            if ((uint32_t)copy.r.width != tex->width || (uint32_t)copy.r.height != tex->height || copy.r.depth != 1)
-                return fail(result, S2A_RECORD_UNSUPPORTED, header.op, "partial texture copy not wired yet");
-            if (copy_image_buffer(device, tex, copy.src, copy.row_stride, copy.image_stride, memory,
-                                  header.op == OP_COPY_T2B))
+            // REC_SNAP 把 tex_t 内嵌在记录里（payload + SNAP_OFF(p_copy_b2t)）：NVN 格式 / 目标 / 层数
+            // 只信快照，不解引用 guest 对象；magic 不对就明确报不支持。
+            const size_t b2t_snap = (sizeof(p_copy_b2t) + 7) & ~(size_t)7;
+            const tex_t *snap = NULL;
+            if (header.size >= sizeof(op_hdr) + b2t_snap + sizeof(tex_t)) {
+                const tex_t *t = (const tex_t *)(payload + b2t_snap);
+                if (t->magic == MAGIC('T', 'E', 'X', 0)) snap = t;
+            }
+            if (!snap) return fail(result, S2A_RECORD_UNSUPPORTED, header.op,
+                "buffer/texture copy record carries no texture snapshot");
+            struct s2a_bt_input in;
+            memset(&in, 0, sizeof in);
+            const int layered = snap->d.target == NVN_TEXTURE_TARGET_2D_ARRAY ||
+                                snap->d.target == NVN_TEXTURE_TARGET_CUBEMAP ||
+                                snap->d.target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
+            const int is_3d = snap->d.target == NVN_TEXTURE_TARGET_3D;
+            in.texture.nvn_format = (uint32_t)snap->d.format;
+            in.texture.vk_format = (uint32_t)tex->format;
+            in.texture.width = tex->width; in.texture.height = tex->height;
+            in.texture.depth = is_3d ? (tex->depth ? tex->depth : snap->d.depth) : 1;
+            in.texture.levels = tex->levels ? tex->levels : (snap->d.levels ? snap->d.levels : 1);
+            in.texture.layers = layered ? (tex->layers ? tex->layers : snap->d.depth) : 1;
+            in.texture.samples = (uint32_t)(snap->d.samples > 0 ? snap->d.samples : 0);
+            in.texture.target = snap->d.target;
+            if (copy.has_view) {
+                in.view.has = 1;
+                in.view.set_format = copy.view.set_format; in.view.format = copy.view.format;
+                in.view.set_levels = copy.view.set_levels;
+                in.view.base_level = copy.view.base_level; in.view.nlevels = copy.view.nlevels;
+                in.view.set_layers = copy.view.set_layers;
+                in.view.min_layer = copy.view.min_layer; in.view.nlayers = copy.view.nlayers;
+                in.view.set_target = copy.view.set_target; in.view.target = copy.view.target;
+                in.view.set_swizzle = copy.view.set_swizzle; in.view.set_dsmode = copy.view.set_dsmode;
+            }
+            in.region = (struct s2a_bt_region){copy.r.xoffset, copy.r.yoffset, copy.r.zoffset,
+                                               copy.r.width, copy.r.height, copy.r.depth};
+            in.direction = header.op == OP_COPY_T2B ? S2A_BT_TO_BUFFER : S2A_BT_TO_TEXTURE;
+            in.flags = (uint32_t)copy.flags;
+            in.row_stride = copy.row_stride; in.image_stride = copy.image_stride;
+            in.guest_address = copy.src;
+            in.max_staging_bytes = MAX_COPY; in.max_guest_span = (uint64_t)MAX_COPY * 4;
+            struct s2a_bt_plan plan;
+            char why[160];
+            int prc = s2a_buffer_texture_plan(&in, &plan, why, sizeof why);
+            if (prc) {
+                static char msg[224];
+                snprintf(msg, sizeof msg, "buffer/texture copy: %s", why);
+                return fail(result, prc == S2A_BT_UNSUPPORTED ? S2A_RECORD_UNSUPPORTED :
+                                    prc == S2A_BT_LIMIT ? S2A_RECORD_LIMIT : S2A_RECORD_INVALID, header.op, msg);
+            }
+            if (copy_buffer_texture(device, tex->image, &plan, memory))
                 return fail(result, S2A_RECORD_GPU, header.op, "GPU buffer/texture copy failed");
             // B2T（guest 缓冲 → 纹理）是 GPU 写图像：登记 gpu_written，否则 ReadTexels /
             // 缓存淘汰会把 guest 内存里的旧字节当成这张纹理的当前内容（T2B 只读图像，不登记）。
@@ -2099,14 +2185,15 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
                 extern void s2a_vk_adapter_mark_written(VkImage image) __attribute__((weak));
                 if (s2a_vk_adapter_mark_written) s2a_vk_adapter_mark_written(tex->image);
             }
-            // 诊断（最多 64 条）：谁在什么时候把整张图拷进/拷出 guest 内存（截图/流式路径定位）。
+            // 诊断（最多 64 条）：谁在什么时候把图拷进/拷出 guest 内存（截图/流式路径定位）。
             {
                 static int n;
                 if (n++ < 64)
                     __android_log_print(ANDROID_LOG_INFO, "S2Arm",
-                        "tex copy %s tex=%ux%u fmt=0x%x row_stride=%u image_stride=%u",
+                        "tex copy %s tex=%ux%u fmt=0x%x mip=%u layer=%u+%u region=%u,%u,%u %ux%ux%u row_stride=%u image_stride=%u",
                         header.op == OP_COPY_T2B ? "t2b" : "b2t", tex->width, tex->height, (unsigned)tex->format,
-                        (unsigned)copy.row_stride, (unsigned)copy.image_stride);
+                        plan.mip, plan.base_layer, plan.layer_count, plan.x, plan.y, plan.z, plan.width, plan.height,
+                        plan.depth, (unsigned)copy.row_stride, (unsigned)copy.image_stride);
             }
             break;
         }
@@ -2686,7 +2773,7 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
             const int dmask = v.depth_mask != 0;
             // NVN 的 stencil 掩码是 8 位平面掩码：0x01 只清 bit0，0xFF 才是整平面。
             // 位掩码用受 VkStencilWriteMask 约束的清除绘制表达，绝不把部分掩码降成整平面清除。
-            const uint32_t smask = (uint32_t)v.stencil_mask & 0xffu;
+            uint32_t smask = (uint32_t)v.stencil_mask & 0xffu;
             if (!dmask && !smask) break;
             char why[192];
             VkFormat fmt = nvn_vk_format(S->rt_depth_snap.d.format);
@@ -2698,9 +2785,8 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
                 return fail(result, S2A_RECORD_UNSUPPORTED, header.op,
                             "clear-depth-stencil through a format-overriding attachment view has no mutable depth path");
             const int has_stencil = nvn_vk_format_has_stencil(fmt);
-            if (smask && !has_stencil)
-                return fail(result, S2A_RECORD_UNSUPPORTED, header.op,
-                            "clear requests stencil on a depth-only target format");
+            // 目标没有模板面时，清模板是空操作（硬件上、Metal 上都是）：游戏对纯深度目标也会带着模板位清。
+            if (smask && !has_stencil) { smask = 0; if (!dmask) break; }
             VkImageAspectFlags aspect = (dmask || smask) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0;
             if (smask) aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
             const struct s2a_replay_texture *texture = find_texture(textures, texture_count, &S->rt_depth_snap);
@@ -2799,6 +2885,11 @@ int s2a_record_replay(struct s2a_vk_device *device, const uint8_t *begin, const 
             }
             extern void s2a_vk_adapter_mark_written(VkImage image) __attribute__((weak));
             if (s2a_vk_adapter_mark_written) s2a_vk_adapter_mark_written(texture->image);
+            {
+                /* C4a 首用证据：深度目标的内容在本帧重新起过（同 OP_CLEAR_COLOR 的 fresh 标记）。 */
+                extern void nvn_vk_fu_rt_fresh(uint64_t serial) __attribute__((weak));
+                if (nvn_vk_fu_rt_fresh) nvn_vk_fu_rt_fresh(S->rt_depth_snap.serial);
+            }
             break;
         }
         case OP_TF_BIND: {

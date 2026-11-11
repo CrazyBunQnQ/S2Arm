@@ -1635,6 +1635,54 @@ static void blend_draw(nvn_gpu_pipe pipe, const float clear[4], const float vb[4
     nvn_gpu_buf_release(buf, NULL, NULL); nvn_gpu_buf_release(rb, NULL, NULL);
 }
 
+// C69：双源混合因子（NVN 0x10–0x13 → SRC1_*）。缺 dualSrcBlend 的机型（多数 Mali / Xclipse 之外的低端档）
+// 用到它的管线须按规定报 UNSUPPORTED、不崩、不建 Vulkan 管线；有特性时须正常建成。
+// 先测缺特性（把已启用的位临时清掉），再测设备实况：成功的管线进后端缓存，顺序反了会命中缓存。
+static nvn_gpu_rc c69_dual_src_get(const char *dir, nvn_gpu_pipe *pipe, nvn_gpu_err *e) {
+    void *vsm = NULL, *fsm = NULL;
+    nvn_gpu_shader vs = NULL, fs = NULL;
+    *pipe = NULL;
+    if (!load_shader_pair(dir, "quad.vert", "quad.frag", NULL, NULL, &vs, &fs, &vsm, &fsm)) {
+        nvn_gpu_rc bad = {NVN_GPU_E_ARG};
+        return bad;
+    }
+    nvn_gpu_pipe_desc pd;
+    memset(&pd, 0, sizeof pd);
+    pd.color.logic_op = 0x3;
+    pd.st[NVN_GPU_SH_VS].sh = vs; pd.st[NVN_GPU_SH_FS].sh = fs;
+    pd.cfmt[0] = NVN_FORMAT_RGBA8; pd.samples = 1; pd.prim = 4; pd.chmask.mask = 0xF;
+    pd.color.blend_en = 1;
+    pd.blend[0].src_rgb = 0x10; pd.blend[0].dst_rgb = 0x11;   // SRC1_COLOR / ONE_MINUS_SRC1_COLOR
+    pd.blend[0].src_a = 0x2; pd.blend[0].dst_a = 0x1; pd.blend[0].eq_rgb = 1; pd.blend[0].eq_a = 1;
+    pd.attr[0].fmt = NVN_FORMAT_RGBA32F; pd.attr[0].offset = 0; pd.attr[0].stream = 0;
+    pd.attr[1].fmt = NVN_FORMAT_RGBA32F; pd.attr[1].offset = 16; pd.attr[1].stream = 0;
+    pd.stream[0].stride = 32;
+    nvn_gpu_rc r = nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, pipe, e);
+    nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); free(vsm); free(fsm);
+    return r;
+}
+
+static void c69_dual_src_blend(const char *dir) {
+    VkBool32 has = g_dev.core_features.dualSrcBlend;
+    nvn_gpu_pipe pipe = NULL;
+    nvn_gpu_err e;
+    memset(&e, 0, sizeof e);
+    g_dev.core_features.dualSrcBlend = VK_FALSE;
+    nvn_gpu_rc r = c69_dual_src_get(dir, &pipe, &e);
+    g_dev.core_features.dualSrcBlend = has;
+    CHECK(r.code == NVN_GPU_E_UNSUPPORTED && !pipe, "C69 缺 dualSrcBlend 时双源混合管线应 UNSUPPORTED，实 %d", r.code);
+    pipe = NULL;
+    memset(&e, 0, sizeof e);
+    r = c69_dual_src_get(dir, &pipe, &e);
+    if (has) {
+        CHECK(OK(r) && pipe, "C69 有 dualSrcBlend 时双源混合管线应建成：%d %s", r.code, e.why);
+    } else {
+        CHECK(r.code == NVN_GPU_E_UNSUPPORTED && !pipe, "C69 设备无 dualSrcBlend，双源混合管线应 UNSUPPORTED，实 %d", r.code);
+    }
+    printf("C69 双源混合：设备 dualSrcBlend=%u，缺特性时 UNSUPPORTED%s\n", (unsigned)has,
+           has ? "，有特性时建成" : "（本机实况即缺特性）");
+}
+
 static void c43_blend(const char *dir) {
     float red_half[4][8] = {{-1,-1,0,1, 1,0,0,0.5f},{-1,1,0,1, 1,0,0,0.5f},{1,-1,0,1, 1,0,0,0.5f},{1,1,0,1, 1,0,0,0.5f}};
     float red[4][8] = {{-1,-1,0,1, 1,0,0,1},{-1,1,0,1, 1,0,0,1},{1,-1,0,1, 1,0,0,1},{1,1,0,1, 1,0,0,1}};
@@ -3158,6 +3206,10 @@ int main(int argc, char **argv) {
         return 2;   // 不静默跳过：run.sh 把 2 当红
     }
     printf("device: %s (%s)\n", g_dev.properties.deviceName, g_dev.driver_name);
+    // 机型模拟档（android/tests/vk/sim_tiers.sh）按这行核对模拟层确实藏掉了对应能力。
+    printf("sim caps: vertexPipelineStoresAndAtomics=%u dualSrcBlend=%u calibrated_timestamps=%d（0 = 无校准扩展，走完成点兜底）\n",
+           (unsigned)g_dev.core_features.vertexPipelineStoresAndAtomics, (unsigned)g_dev.core_features.dualSrcBlend,
+           g_dev.calibrated_timestamps);
     if (argc < 2) {
         printf("用法：%s <shader-dir>（run.sh 会编译 tri.vert/frag 到该目录）\n", argv[0]);
         return 2;
@@ -3317,8 +3369,11 @@ int main(int argc, char **argv) {
     if (!open_backend()) return 1;
     c59b_legacy_binding(argv[1]);
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C59b close：%d %s", e18.rc.code, e18.why);
+    if (!open_backend()) return 1;
+    c69_dual_src_blend(argv[1]);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C69 close：%d %s", e18.rc.code, e18.why);
 
-    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C68 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
+    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
            g_fail ? "红" : "绿", g_fail, atomic_load(&g_ndone), atomic_load(&g_retired));
     s2a_vk_device_destroy(&g_dev, 1);   // 最后一个会话已在 t20 close 里证明空闲
     return g_fail ? 1 : 0;

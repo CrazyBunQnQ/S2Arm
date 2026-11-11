@@ -25,8 +25,9 @@
 --parts apk：安卓单库 libs2arm_android.so（APK 里那个库）同一套真编真链。起因 #1086：共享前端 hle_nvn.c 每帧调用
 nvn_be_tex_tick，只有 Apple 后端有定义，单库缺符号；core-link/link_symbols.py 的 -z defs 真链只在合入后层，合入前没拦住。
   1. 用 NDK 自带的 build/cmake/android.toolchain.cmake（与 Gradle 同一工具链、arm64-v8a、android-29 = minSdk、Debug）按
-     android/CMakeLists.txt 的 if(ANDROID) 分支配置，APK_CONFIGS 四种组合各配一次：诊断 / 游戏 × 直连前端关 /
-     nvn_vk 后端（S2A_ANDROID_VK_ENGINE 开时共享前端 hle_nvn.c 等才编进来）；
+     android/CMakeLists.txt 的 if(ANDROID) 分支配置，APK_CONFIGS 五种组合各配一次：诊断 / 游戏 × 直连前端关 /
+     nvn_vk 后端（S2A_ANDROID_VK_ENGINE 开时共享前端 hle_nvn.c 等才编进来），外加 Gradle 缺省的诊断构建
+     （S2A_CS_SERVICES=0、不带探针，#557）；
   2. NativeAOT 静态服务层（libs2a_cs.a）不编：沿用 link_symbols.py 的 S2A_ANDROID_LINK_PROBE 探针——check_once 从真实
      C# 工程收出 DllImport 入口（探针引用它们）和 [UnmanagedCallersOnly] 导出（探针给空定义），write_probe 写探针；
   3. 只编 s2arm_android 目标（-Werror、-z defs 都照目标原样，不剥），ld.lld 每个缺的符号打一行【红】，探针引用的缺口
@@ -66,10 +67,14 @@ OBJ_TARGET = re.compile(r"CMakeFiles/([^/]+)\.dir/")
 # 单库配置：(模式, S2A_ANDROID_VK_ENGINE, S2ARM_ANDROID_VK_BACKEND, 标签)。Gradle 缺省是引擎关；引擎开时
 # 共享前端（graphics/nvn/gfx/nvn/hle_nvn.c 等）编进来，两种后端各自要给齐 nvn_be_* —— #1086 缺的就在这里。
 APK_CONFIGS = (   # engine 后端已随 #1108 删除，S2ARM_ANDROID_VK_BACKEND 只剩 nvn_vk
-    ("diagnostic", "OFF", "nvn_vk", "诊断"),
-    ("diagnostic", "ON", "nvn_vk", "诊断 + nvn_vk 后端"),
-    ("game", "OFF", "nvn_vk", "游戏"),
-    ("game", "ON", "nvn_vk", "游戏 + nvn_vk 后端"),
+    # 最后一项 = 带不带 link_symbols 探针（探针配置走 S2A_ANDROID_LINK_PROBE，等同服务层静态链入的源集合）
+    ("diagnostic", "OFF", "nvn_vk", "诊断", True),
+    ("diagnostic", "ON", "nvn_vk", "诊断 + nvn_vk 后端", True),
+    ("game", "OFF", "nvn_vk", "游戏", True),
+    ("game", "ON", "nvn_vk", "游戏 + nvn_vk 后端", True),
+    # Gradle 缺省 assembleDebug：S2A_CS_SERVICES=0、没有探针，服务层不链入（#557：这条路缺 s2a_host_session_state，
+    # 上面四种都带探针 = 走静态源集合，没拦住）。game 模式要求 static（CoreLink.cmake），只有诊断有这条路。
+    ("diagnostic", "OFF", "nvn_vk", "诊断 · Gradle 缺省（服务层不链入）", False),
 )
 APK_LIB = "libs2arm_android.so"
 
@@ -255,7 +260,7 @@ def apk_probes(root, work, cs_project):
     """每种模式写一个链接探针（link_symbols.check_once + write_probe），返回 ({模式: 探针路径}, {符号: [C# 位置…]})。"""
     probes, sites, cache = {}, {}, {}
     projects = [Path(cs_project) if os.path.isabs(cs_project) else Path(root) / cs_project]
-    for mode in sorted({c[0] for c in APK_CONFIGS}):
+    for mode in sorted({c[0] for c in APK_CONFIGS if c[4]}):
         r = link_symbols.check_once(Path(root), mode, projects, None, False, "cmake", cache)
         # s2a_avc_* 由 libavc 第三方归档提供（合入后层带真归档链），合入前不链归档、探针不引用
         req = [i for i in r["required"] if i["library"] in link_symbols.TARGET_LIBS and not i["symbol"].startswith("s2a_avc_")]
@@ -282,7 +287,7 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
         return len(APK_CONFIGS), 0, 1, []
     linked = red = 0
     bdirs = []
-    for i, (mode, engine, backend, label) in enumerate(APK_CONFIGS):
+    for i, (mode, engine, backend, label, use_probe) in enumerate(APK_CONFIGS):
         tlabel = "%s（%s）" % (APK_LIB, label)
         bdir = work / ("apk%d" % i)
         cfg = subprocess.run([
@@ -290,7 +295,8 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
             "-DCMAKE_TOOLCHAIN_FILE=" + str(toolchain), "-DANDROID_ABI=arm64-v8a",
             "-DANDROID_PLATFORM=android-29", "-DCMAKE_BUILD_TYPE=Debug",
             "-DS2A_ANDROID_NATIVE_MODE=" + mode, "-DS2A_ANDROID_VK_ENGINE=" + engine,
-            "-DS2ARM_ANDROID_VK_BACKEND=" + backend, "-DS2A_ANDROID_LINK_PROBE=" + str(probes[mode])],
+            "-DS2ARM_ANDROID_VK_BACKEND=" + backend,
+            "-DS2A_ANDROID_LINK_PROBE=" + (str(probes[mode]) if use_probe else ""), "-DS2A_CS_SERVICES=0"],
             capture_output=True, text=True)
         if cfg.returncode:
             print("\n".join((cfg.stdout + cfg.stderr).strip().splitlines()[-20:]))
@@ -308,7 +314,7 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
             merged["other"] += f["other"]
             merged["first"] = merged["first"] or f["first"]
         if fails:
-            red += report({tlabel: merged}, root, tlabel, probes[mode], sites)
+            red += report({tlabel: merged}, root, tlabel, probes[mode] if use_probe else None, sites)
         elif bld.returncode:
             print("\n".join((bld.stdout + bld.stderr).strip().splitlines()[-20:]))
             print("【红】目标 %s ninja 失败（rc=%d）但没解析出失败目标" % (tlabel, bld.returncode))
@@ -318,7 +324,7 @@ def apk_part(root, project, work, ndk, jobs, cs_project):
         elif not fails and not bld.returncode:
             print("【红】目标 %s 没链出来（射程不全）" % tlabel)
             red += 1
-    print("单库链接配置 %d 个（%s，NDK 安卓工具链 arm64-v8a android-29，诊断 / 游戏 × 直连前端关 / nvn_vk）：链过 %d、红 %d" % (
+    print("单库链接配置 %d 个（%s，NDK 安卓工具链 arm64-v8a android-29，诊断 / 游戏 × 直连前端关 / nvn_vk + 诊断 Gradle 缺省）：链过 %d、红 %d" % (
         len(APK_CONFIGS), APK_LIB, linked, len(APK_CONFIGS) - linked))
     return len(APK_CONFIGS), linked, red, bdirs
 

@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "mtl_vk_adapter.h"
+#include "nvn_vsync_android.h"   // nvn_be_link_* 节拍源：debug.s2a.vsync 门内的 AChoreographer 拍
 #include "nvn_obj.h"
 #include "redlog.h"
 #pragma weak nvn_ga2ca
@@ -371,6 +372,7 @@ static void shim_async_stop(void) {
 
 // 供 provider stop 调用：先把队列跑空，再唤醒并 join 翻译线程。
 void s2a_mtl_async_stop(void) {
+    s2a_android_link_stop();   // 显示节拍源同步退（节拍独立于异步档，先停）
     if (shim_async_mode() == SHIM_ASYNC_OFF || !g_gfx_tid_valid) return;
     shim_drain();
     shim_async_stop();
@@ -505,8 +507,12 @@ void mtl_sub_begin(void) {
     // 保守档：在开始下一次提交之前把队列跑空。这保证 game 复用/释放上一提交的命令内存时，
     // 翻译线程已经不再读它——代价是只在「上一次 commit 到这一次 begin」之间能重叠。
     if (shim_async_mode() == SHIM_ASYNC_CONSERVATIVE) shim_drain();
+    // 回放状态只在本进程第一次提交前复位（同 Metal nvn_be_exec 的 inited）：NVN 的绑定状态挂在队列上，
+    // 上一批命令设的池 / 程序 / 绑定下一批仍然有效。每次提交都清零的话，游戏只在早先的提交里设过一次的
+    // 采样器池到首笔 draw 时已是 0，编译请求缺 samplerArrayLength 被拒（#539）。
     // 复位必须排在本次提交的 exec 作业之前，所以也走队列（不能就地做，会和 worker 上的状态打架）。
-    shim_enqueue(job_reset_state, NULL);
+    static int state_inited;
+    if (!state_inited) { state_inited = 1; shim_enqueue(job_reset_state, NULL); }
     s2a_record_flat_reset();
 }
 
@@ -783,6 +789,13 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     }
     uint64_t present_ns = shim_now_ns() - t_present;
     uint64_t n = ++g_present_n;
+    // 每上一帧调一次共用 ap_host 的上屏出口：内部一次带上 dguard 帧证据、停住看门、HUD
+    // 与帧计数全套（同 iOS dm_guest_frame_tick 的口径）。ap_host.c 只在游戏目标里，
+    // 独立直连探针没链就跳过。
+    {
+        extern void s2a_frame_presented(void) __attribute__((weak));
+        if (s2a_frame_presented) s2a_frame_presented();
+    }
     if (n == 1) info("mtl_present: first frame presented (nvn_vk backend, tex %ux%u)",
                      t ? (unsigned)t->d.width : 0u, t ? (unsigned)t->d.height : 0u);
     struct timespec ts;
@@ -804,6 +817,9 @@ uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4]) {
     {
         extern void nvn_vk_frame_log_present(void) __attribute__((weak));
         if (nvn_vk_frame_log_present) nvn_vk_frame_log_present();
+        // 逐帧 TSV（iOS frames.tsv 同义）：同一 present 成功点写行；函数内自查开关。
+        extern void nvn_vk_frame_tsv_present(uint64_t, double) __attribute__((weak));
+        if (nvn_vk_frame_tsv_present) nvn_vk_frame_tsv_present(n, now);
     }
     // 出账依赖（维护方审 11-04）：w6_account.py 解析 `draw window: draws=` 与
     // `render pass window: hit=...` 两行，这两行不随 debug.s2a.win_stats 开关；
@@ -1105,7 +1121,16 @@ void mtl_present_wait(uint64_t ticket) {
 
 void mtl_present_flush(void) { nvk_require(); }
 void mtl_present_test_stall(uint64_t ns) { (void)ns; }
-double mtl_presented_time(uint64_t n) { return n && n <= g_present_n && g_present_n - n < 256 ? g_present_at[n % 256] : 0; }
+double mtl_presented_time(uint64_t n) {
+    if (!n || n > g_present_n || g_present_n - n >= 256) return 0;
+    // B2：display_timing 计量中 → 只报实际上屏时刻，取不到就是 UNKNOWN（0），
+    // 不拿 CPU present 返回时刻冒充（定稿 A6）；扩展缺席的设备维持原口径。
+    extern int nvn_vk_dt_active(void) __attribute__((weak));
+    extern double nvn_vk_dt_shown(uint64_t) __attribute__((weak));
+    if (nvn_vk_dt_active && nvn_vk_dt_shown && nvn_vk_dt_active())
+        return nvn_vk_dt_shown(n);
+    return g_present_at[n % 256];
+}
 uint64_t mtl_present_count(void) { return g_present_n; }
 
 void *mtl_device(void) { return NULL; }   // 没有共享 Metal device：本后端是 Vulkan
@@ -1141,8 +1166,10 @@ void mtl_set_origin_lower_left(int on) { g_origin_lower_left = on; }
 void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_set_frame(uint64_t f) { g_frame = f; g_frame_set = 1; }
 void mtl_ub_present(double iv_ms) { (void)iv_ms; }
-int mtl_link_active(void) { return 0; }
-int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { (void)vsyncs; (void)timeout_ns; return 0; }
+// nvn_be_link_*：显示节拍。debug.s2a.vsync 默认关（等设备 A/B）——关着或未起节拍源时
+// active=0、wait_tick 回 0，hle_nvn 回退自己的 60Hz 时钟，行为与改动前一致。
+int mtl_link_active(void) { return s2a_android_link_active() && mtl_has_window(); }
+int mtl_link_wait_tick(int vsyncs, uint64_t timeout_ns) { return s2a_android_link_wait_tick(vsyncs, timeout_ns); }
 int mtl_warm_wait(int timeout_ms) { (void)timeout_ms; return 0; }
 void mtl_bad_draw_feat(const char *why) { red("mtl_bad_draw_feat: %s", why ? why : "unsupported draw feature"); }
 int mtl_ui_ghost_rect(float r[4]) { (void)r; return 0; }

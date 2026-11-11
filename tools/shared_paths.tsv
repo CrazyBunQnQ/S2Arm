@@ -107,6 +107,7 @@ run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原
 ~/Library/Caches/colima/caches	基础设施线（colima 镜像缓存）	colima 系统镜像缓存（文件名 = 镜像地址的 sha256）；tools/colima_setup.sh 经代理下好、核过 SHA512 后放进来	先下到缓存外临时文件，核对通过才 mv 进来（colima start 失败会清空整个缓存目录，10-29）
 ~/Library/Caches/s2a_vulkan	一次成功线（Vulkan 容器单测）	tests/vulkan/run.sh 挂进容器 /cache；shader_cases/<编译输入摘要>/translator 存编好的 ShaderCases.dll（tests/shader_cases/run.py build_key）	内容寻址：未命中编完拷进同目录临时名再整目录 rename，同键并发只落一份；只留最近 8 份；删了只让下次冷编
 ~/.s2arm/run/s2arm/cache/testres	列车线	门禁单测结果缓存（tools/test_cache.py，tools/gate.sh 用；键 = 单测名 + 输入文件内容哈希 + 工具链指纹，一键一个空文件，只记绿；gate-host 上在远端假家目录下）	内容寻址；写 .<键>.<pid>.tmp 再 os.replace，同键并发写结果相同；读方只看文件在不在
+~/.s2arm/run/s2arm/gate_ledger.jsonl	列车线	门禁台账（tools/gate.sh gl_put：每步一行 JSON，步名 / 缓存键 / 在哪台 / 退出码 / 秒数 / 排令牌秒数 / 调用方；GATE_LEDGER 可改、=- 关）	只追加，每行一次 printf >> 写（远小于管道原子长度），多份门禁并发追加不交错；读方按行解析
 ~/.s2a/lanes	出包线（11-01）	同机正在出包的道数登记（tools/cores.sh s2a_lanes：每道按入口进程号建空文件，算并行度时数活着的）	每道只写自己进程号的空文件；数道数时删进程已退的登记；内容为空，撞了也只是多 / 少数一道
 ~/.s2arm/run/s2arm/census_dcache	出包线（11-01）	普查直连库缓存（远端常驻，按程序号分目录；tools/census/dcache_gc.py 管总量上限，Spare-host 缺省 40 GB）	dmsh_store 自带片锁与 .inuse 共享锁；超上限按 .used 最久没用的款淘汰，在用（.inuse 拿不到独占锁）与本次要用的款不动；删除走 safe_rm
 ~/.cache/s2arm-build/post-prepare.lock	合入线	合入后钩子 tools/post_android_prepare.sh 的串行锁（两棵钩子树同时跑时 prepare 排队）；S2A_ANDROID_PREPARE_LOCK 可改	mkdir 原子拿锁、写 pid；持锁进程死了下一个收回；退出时 trap 删

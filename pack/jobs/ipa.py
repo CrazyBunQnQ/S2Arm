@@ -311,6 +311,10 @@ def _build(c):
     missing = [m for m in (res.get("aoc_missing") or []) if m]
     if missing:
         c.diagnostic("追加内容 %d 份没解出，包里不含（%s）" % (len(missing), "、".join(missing[:5]) + (" 等" if len(missing) > 5 else "")), code="aoc_missing", severity="warning")
+    root = product_root(c, gid)
+    if root:
+        from build import warn_offline_empty
+        warn_offline_empty(c, root)   # 离线 0 支（#470）：照常交付，完成页带黄字
     # 早装先收尾再清理：清理会删它正在读的 roots/<款>@现行 与 .early（审计 P1-146：直连命中缓存时出包比早装推得快）
     pre = early.finish() if early else None
     # Q15：成功清一次性中间产物，编库缓存跨次保留并按预算裁剪；失败留现场。

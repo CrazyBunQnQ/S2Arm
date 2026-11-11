@@ -61,7 +61,7 @@ def main():
         prefix=prefix.replace('assert(c->codeSize==20);CREATE','assert(c->codeSize==20);pipeline++;CREATE')
         # 本线 w2_compute_pipeline_test.c 的 Vulkan mock 是分支版（不是 main 的 fixture.binding_count-drop
         # 形态）：同样只保留“n==1”的弱断言，并跳过逐绑定的描述符断言（本用例的 fixture 自己管绑定）。
-        old='assert((n==2&&w[0].dstBinding==3&&w[1].dstBinding==9)||(n==1&&w[0].dstBinding==9));'
+        old='assert(n<=(uint32_t)fixture.binding_count);for(uint32_t i=0;i<n;i++){int infix=0;for(int j=0;j<fixture.binding_count;j++)if(w[i].dstBinding==(uint32_t)fixture.bindings[j].binding)infix=1;assert(infix);}'  # #473 起夹具按 fixture.bindings 校验；本测试只走单绑定
         assert old in prefix;prefix=prefix.replace(old,'assert(n==1);')
         old='for(uint32_t i=0;i<n;i++) if(w[i].descriptorType==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)'
         assert old in prefix;prefix=prefix.replace(old,'for(uint32_t i=0;i<n&&0;i++) if(w[i].descriptorType==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)')

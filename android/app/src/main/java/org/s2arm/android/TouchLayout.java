@@ -92,6 +92,72 @@ final class TouchLayout {
         this.sticks = Collections.unmodifiableList(new ArrayList<>(sticks));
     }
 
+    /**
+     * Android's built-in pad as F01, recomputed for each pad box like iOS defaultForSafeRect.
+     * Positions are the historical TouchPad table (fractions of the box; offsets in u = min(w, h) / 10),
+     * sizes are diameters in short-side units. The D-pad is four 0.08 keys 0.08 from its centre, so the
+     * derived D-pad disc (reach + half key, see dpad()) keeps the old 0.12 radius. A stick's activation
+     * is a radius-sized square on the fixed stick centre (Android sticks do not float).
+     */
+    static TouchLayout androidDefault(double width, double height) {
+        viewport(0, 0, width, height);
+        double unit = Math.min(width, height), ux = unit / 10 / width, uy = unit / 10 / height;
+        List<Button> buttons = new ArrayList<>();
+        double px = 0.27, py = 0.82, pd = 0.08, ps = 0.08;
+        buttons.add(new Button("UP", px, py - pd * unit / height, ps, ps, ps / 2));
+        buttons.add(new Button("DOWN", px, py + pd * unit / height, ps, ps, ps / 2));
+        buttons.add(new Button("LEFT", px - pd * unit / width, py, ps, ps, ps / 2));
+        buttons.add(new Button("RIGHT", px + pd * unit / width, py, ps, ps, ps / 2));
+        Object[][] keys = {
+            {"A", 0.93, 0.56, 0.55}, {"B", 0.87, 0.56 + 1.15 * uy, 0.55},
+            {"X", 0.87, 0.56 - 1.15 * uy, 0.55}, {"Y", 0.81, 0.56, 0.55},
+            {"LS", 0.13 + 1.9 * ux, 0.56 - 1.3 * uy, 0.38}, {"RS", 0.73 - 1.7 * ux, 0.80 - 1.1 * uy, 0.38},
+            {"L", 0.17, 0.15, 0.50}, {"R", 0.83, 0.15, 0.50}, {"ZL", 0.07, 0.15, 0.50}, {"ZR", 0.93, 0.15, 0.50},
+            {"PLUS", 0.58, 0.12, 0.40}, {"MINUS", 0.42, 0.12, 0.40}};
+        for (Object[] k : keys) {
+            double side = (double) k[3] / 5;   // diameter 2r * u, in units of 10u
+            buttons.add(new Button((String) k[0], (double) k[1], (double) k[2], side, side, side / 2));
+        }
+        List<Stick> sticks = new ArrayList<>();
+        sticks.add(fixedStick("left", 0.13, 0.56, 0.145, unit, width, height));
+        sticks.add(fixedStick("right", 0.73, 0.80, 0.12, unit, width, height));
+        return new TouchLayout("default", "default", buttons, sticks);
+    }
+
+    private static Stick fixedStick(String id, double cx, double cy, double radius,
+                                    double unit, double width, double height) {
+        double w = radius * unit / width, h = radius * unit / height;
+        return new Stick(id, cx - w / 2, cy - h / 2, w, h, radius);
+    }
+
+    /** Centre of the stick's activation region, in viewport pixels (where Android's fixed stick sits). */
+    double[] stickCentre(String id, double left, double top, double width, double height) {
+        viewport(left, top, width, height);
+        Rect a = stick(id).activation;
+        return new double[] {left + (a.x + a.width / 2) * width, top + (a.y + a.height / 2) * height};
+    }
+
+    /**
+     * One disc over the four direction keys (iOS dpadDirectionsAt): centre = mean of their centres,
+     * radius = farthest centre + half the widest key side. Returns {x, y, radius} in viewport pixels.
+     */
+    double[] dpad(double left, double top, double width, double height) {
+        String[] ids = {"UP", "DOWN", "LEFT", "RIGHT"};
+        double sx = 0, sy = 0, reach = 0, half = 0;
+        Rect[] frames = new Rect[4];
+        for (int i = 0; i < 4; i++) {
+            frames[i] = frameForButton(ids[i], left, top, width, height);
+            sx += frames[i].x + frames[i].width / 2;
+            sy += frames[i].y + frames[i].height / 2;
+        }
+        double cx = sx / 4, cy = sy / 4;
+        for (Rect f : frames) {
+            reach = Math.max(reach, Math.hypot(f.x + f.width / 2 - cx, f.y + f.height / 2 - cy));
+            half = Math.max(half, Math.max(f.width, f.height) / 2);
+        }
+        return new double[] {cx, cy, reach + half};
+    }
+
     static TouchLayout read(byte[] data) {
         require(data != null && data.length <= MAX_BYTES, "layout must be at most 64 KiB");
         String text;

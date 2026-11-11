@@ -52,6 +52,37 @@ void dm_gl_bad_draws(uint64_t *feat, uint64_t *err) { *feat = gl_bad_feat; *err 
 // 引用各片的锚（gl_int.h「分片锚」）：静态链接时每片的登记段都进来（used：没人读也留着这些引用）
 __attribute__((used)) static const char *const gl_slices[] = {&gl_slice_egl, &gl_slice_gl_buf, &gl_slice_gl_draw, &gl_slice_gl_fb, &gl_slice_gl_prog, &gl_slice_gl_tex};
 // __DATA,swgl：GL / GLB 宏登记的（名字 → 实现）。没有的名字回 NULL（GL 规范允许取不到扩展函数），每个名字记一次日志，供普查差集
+// 核心函数（名字结尾不是两个以上大写字母的厂商后缀 ARB / EXT / NV …）没实现时不回空：游戏按报的 GL 版本直接调，拿到空指针就跳到 0、
+//   iOS 当场按代码签名杀掉（小丑牌 v0.2.6 玩家 iPhone 5 次起局都这样）。交一个预编好的空实现：第一次调用打红点名、回 0，
+//   日志直接看出游戏用了哪个，再给真实现。扩展函数照旧回空（GL 允许取不到，程序常按指针判支持）
+static int gl_core_name(const char *n) {
+    size_t l = strlen(n), u = 0; while (u < l && n[l - 1 - u] >= 'A' && n[l - 1 - u] <= 'Z') u++;
+    return u < 2 && !strncmp(n, "gl", 2);
+}
+// 空实现个数 = GL_MISS_N（4096）：GL 4.6 兼容档的全部核心名约 2000+，LÖVE / glad 起局一次查一千多个（小丑牌 v0.2.7：没实现的核心名 854 个），
+//   256 个时用完就退回空、照样跳 0。每个空实现是一条带编号的小函数（第一次调用按编号点名），编号用十六进制三位拼出来：gl_miss_abc ↔ 0xabc
+enum { GL_MISS_N = 0x1000 };
+static const char *g_gl_miss_name[GL_MISS_N];
+static __attribute__((noinline)) uint64_t gl_miss_call(int i) {
+    static _Atomic uint8_t said[GL_MISS_N]; if (!atomic_exchange(&said[i], 1)) GLOG("【红】 游戏调了没实现的 GL 核心函数 %s（空实现，什么都不做、回 0）", g_gl_miss_name[i]);
+    return 0;
+}
+#define GLM_F(X, Y, Z) static uint64_t gl_miss_##X##Y##Z(void) { return gl_miss_call(0x##X##Y##Z); }
+#define GLM_P(X, Y, Z) (void *)gl_miss_##X##Y##Z,
+#define GLM_16(M, X, Y) M(X, Y, 0) M(X, Y, 1) M(X, Y, 2) M(X, Y, 3) M(X, Y, 4) M(X, Y, 5) M(X, Y, 6) M(X, Y, 7) M(X, Y, 8) M(X, Y, 9) M(X, Y, a) M(X, Y, b) M(X, Y, c) M(X, Y, d) M(X, Y, e) M(X, Y, f)
+#define GLM_256(M, X) GLM_16(M, X, 0) GLM_16(M, X, 1) GLM_16(M, X, 2) GLM_16(M, X, 3) GLM_16(M, X, 4) GLM_16(M, X, 5) GLM_16(M, X, 6) GLM_16(M, X, 7) \
+                      GLM_16(M, X, 8) GLM_16(M, X, 9) GLM_16(M, X, a) GLM_16(M, X, b) GLM_16(M, X, c) GLM_16(M, X, d) GLM_16(M, X, e) GLM_16(M, X, f)
+#define GLM_4096(M) GLM_256(M, 0) GLM_256(M, 1) GLM_256(M, 2) GLM_256(M, 3) GLM_256(M, 4) GLM_256(M, 5) GLM_256(M, 6) GLM_256(M, 7) \
+                    GLM_256(M, 8) GLM_256(M, 9) GLM_256(M, a) GLM_256(M, b) GLM_256(M, c) GLM_256(M, d) GLM_256(M, e) GLM_256(M, f)
+GLM_4096(GLM_F)
+static void *const g_gl_miss_fn[GL_MISS_N] = { GLM_4096(GLM_P) };
+_Static_assert(sizeof g_gl_miss_fn / sizeof *g_gl_miss_fn == GL_MISS_N, "空实现表长");
+// 编号空实现用完（GL 全部核心名也到不了 4096，留作兜底）：共用这一个——不读参数、x0 回 0，arm64 下对任意签名的调用都安全；
+//   只是调用时点不出名字（lookup 那行已经记了名字），所以没有上限、永不回空
+static __attribute__((noinline)) uint64_t gl_miss_shared(void) {
+    static _Atomic uint8_t said; if (!atomic_exchange(&said, 1)) GLOG("【红】 游戏调了没实现的 GL 核心函数（编号空实现已用完、走共用空实现，名字见 lookup 行）");
+    return 0;
+}
 void *gl_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!name) return NULL;
@@ -61,7 +92,14 @@ void *gl_lookup(const char *name) {
     static const char *seen[4096]; static int nseen; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
     int known = 0; for (int i = 0; i < nseen; i++) if (!strcmp(seen[i], name)) { known = 1; break; }
-    if (!known && nseen < 4096) { seen[nseen++] = strdup(name); GLOG("lookup %s → %s", name, fn ? "宿主实现" : "没有（回空）"); }
+    const char *how = fn ? "宿主实现" : "没有（回空）";
+    if (!fn && gl_core_name(name)) {   // 同一个名字再查给同一个空实现
+        static int nmiss; int i = 0; while (i < nmiss && strcmp(g_gl_miss_name[i], name)) i++;
+        if (i == nmiss && nmiss < GL_MISS_N) { g_gl_miss_name[nmiss] = strdup(name); nmiss++; }
+        if (i < nmiss) { fn = g_gl_miss_fn[i]; how = "没有（核心函数，交空实现）"; }
+        else { fn = (void *)gl_miss_shared; how = "没有（核心函数，交共用空实现）"; }
+    }
+    if (!known && nseen < 4096) { seen[nseen++] = strdup(name); GLOG("lookup %s → %s", name, how); }
     pthread_mutex_unlock(&mu);
     return fn;
 }

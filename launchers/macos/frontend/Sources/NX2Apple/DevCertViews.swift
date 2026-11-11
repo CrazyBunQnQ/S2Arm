@@ -14,6 +14,9 @@ private func sx(_ loc: Localizer, _ id: String) -> String { BackendText.launcher
 struct DevCertRow: View {
     @ObservedObject var model: S2ArmLauncherModel
     @EnvironmentObject var loc: Localizer
+    /// 标题与「不用证书」那一项的叫法：环境检查「装到 iPhone 的方式」里叫「签名身份」「Xcode 账号」（Mac 上 Apple ID 只能经 Xcode 登录）
+    var title: String? = nil
+    var appleIdTitle: String? = nil
     @State private var confirmDelete = false
 
     private var on: Bool { model.devCert?.active == true }
@@ -22,10 +25,10 @@ struct DevCertRow: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Image(systemName: "signature").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
-                Text(sx(loc, "title")).font(.manrope(13)).foregroundStyle(.secondary)
+                Text(title ?? sx(loc, "title")).font(.manrope(13)).foregroundStyle(.secondary)
                 Spacer(minLength: 12)
-                Picker(sx(loc, "title"), selection: Binding(get: { on }, set: { model.setDevCertActive($0) })) {
-                    Text(sx(loc, "appleId")).tag(false)
+                Picker(title ?? sx(loc, "title"), selection: Binding(get: { on }, set: { model.setDevCertActive($0) })) {
+                    Text(appleIdTitle ?? sx(loc, "appleId")).tag(false)
                     Text(sx(loc, "devcert")).tag(true)
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 300)

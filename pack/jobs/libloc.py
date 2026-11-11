@@ -61,6 +61,22 @@ def format_ok(fmt, *, system):
     return fmt in (WIN_OK_FORMATS if system == "Windows" else MAC_OK_FORMATS)
 
 
+
+SLACK_CLUSTER = 64 << 10   # 分配单元（簇）≥ 这么大就提示：解包有大量小文件，每个至少占满一个簇（#444 玩家 512 KB 簇的外置盘实占膨胀 5 倍以上）
+
+
+def slack_reason(fmt, cluster, *, system):
+    """存放位置所在卷会让出包多占空间时给原因（只提示不拦），没问题给 None。原因不同、多占的量不同，提示要说对：
+    "cluster" = 分配单元 ≥ 64 KB：解包的大量小文件每个至少占满一个簇，多占数倍（先判这条，它占得最多）；
+    "format" = 格式不是这一端的推荐格式（Mac APFS 才能克隆 / Windows NTFS、ReFS 才有硬链接）：解包和产物要多拷一份。
+    格式和分配单元都读不到 → None（不凭空吓人）"""
+    fmt = (fmt or "").lower()
+    if (cluster or 0) >= SLACK_CLUSTER:
+        return "cluster"
+    if fmt and not format_ok(fmt, system=system):
+        return "format"
+    return None
+
 LIBRARY_FORMAT_MESSAGE = ("这个位置所在的磁盘格式是 {fmt}。游戏原件放在这块盘上没问题（S2Arm 只读、不改不删），"
                           "但导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上：请改用这台 Mac 上的默认位置（内置盘），"
                           "或选一块 APFS 格式的外接盘；外接盘可以在「磁盘工具」里另分出一个 APFS 分区（盘上要有空闲空间，原有数据不动）。")

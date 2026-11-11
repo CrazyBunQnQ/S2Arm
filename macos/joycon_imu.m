@@ -122,6 +122,12 @@ static void attach_device(IOHIDDeviceRef device) {
     d->slot = slot;
     d->pkt = g_pkt_global++;
     d->report_buf = calloc(1, 0x200);
+    if (!d->report_buf) {   // 审计 P2-271：分配失败不能按 0x200 字节登记回调（报告来了写进空指针）；这只手柄本次不接，关掉设备、槽位清空
+        IOHIDDeviceClose(device, kIOHIDOptionsTypeNone); memset(d, 0, sizeof *d);
+        pthread_mutex_unlock(&g_mu);
+        fprintf(stderr, "【红】Joy-Con 体感：读报告缓冲分配失败，这只手柄本次不接体感\n");
+        return;
+    }
     IOHIDDeviceRegisterInputReportCallback(device, d->report_buf, 0x200, report_cb, d);
     int want = atomic_load(&g_want);
     pthread_mutex_unlock(&g_mu);

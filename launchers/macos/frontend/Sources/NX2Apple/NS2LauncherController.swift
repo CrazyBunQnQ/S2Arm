@@ -89,9 +89,10 @@ final class NS2LauncherController: ObservableObject {
         connectManually()
     }
 
-    /// 游戏启动前只交回可用通道；连接本身始终留在 S2Arm 的连接程序内。
+    /// 通道路径固定，开局时手柄还没连也照样交给游戏：游戏没接上时每秒重试，玩家开局后再连手柄，游戏也会接回
+    ///   （以前没连接程序就不给，游戏开着时再连手柄，游戏这边一直没反应）。连接本身始终留在 S2Arm 的连接程序内。
     func relaySocketForGame() -> String? {
-        process == nil ? nil : socketURL.path
+        socketURL.path
     }
 
     func gameDidStart() {

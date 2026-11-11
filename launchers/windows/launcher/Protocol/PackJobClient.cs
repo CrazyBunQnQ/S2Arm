@@ -73,7 +73,7 @@ public sealed class JobEventReader(string jobId, string operation)
 public static class PackJobClient
 {
     public static readonly IReadOnlySet<string> Operations =
-        new HashSet<string>(StringComparer.Ordinal) { "ipa", "installCheck", "install", "installRemove", "installRestore", "customize",
+        new HashSet<string>(StringComparer.Ordinal) { "ipa", "installCheck", "install", "installRemove", "installRestore", "installMode", "installUpdate", "customize",
             "moveGame", "relinkGame", "forgetGame", "clean", "delete", "spaceFree", "devCert" };
 
     /// <param name="Secrets">Environment variables for this one job process only (the developer certificate password,
@@ -85,7 +85,8 @@ public static class PackJobClient
     public static Dictionary<string, object?> Payload(Request request, string jobId)
     {
         if (!Operations.Contains(request.Operation)) throw new ArgumentException("Unsupported pack operation.", nameof(request));
-        var perGame = request.Operation != "devCert";   // the developer certificate belongs to this computer, not a game
+        // The developer certificate and the install mode belong to this computer, installUpdate to the phone (install.update_phone): no game.
+        var perGame = request.Operation is not ("devCert" or "installMode" or "installUpdate");
         if (perGame && string.IsNullOrWhiteSpace(request.GameId)) throw new ArgumentException("A game is required.", nameof(request));
         var payload = new Dictionary<string, object?>
         {
@@ -97,11 +98,11 @@ public static class PackJobClient
         };
         if (perGame) payload["gameId"] = request.GameId;
         // The bundled iPhone shell is a launcher path setting (Settings → Shell); ipa.bundled_shell reads shellDir.
-        if (request.Operation is "ipa" or "install") payload["shellDir"] = Path.GetFullPath(request.Paths.Shell);
+        if (request.Operation is "ipa" or "install" or "installUpdate") payload["shellDir"] = Path.GetFullPath(request.Paths.Shell);
         // Bundled resources next to S2Arm.exe (bundle_win.py layout): ipa reads the shared fonts from resources/Fonts (core.fonts_dir; without it
         // "shared fonts missing", tianyan 11-07); installCheck / install use the Impactor + plumesign shipped in resources/ThirdParty/Impactor
         // (pack/jobs/impactor.py bundled, 11-07 维护者: no download detour for players).
-        if (request.Operation is "ipa" or "installCheck" or "install" or "installRemove" or "installRestore") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
+        if (request.Operation is "ipa" or "installCheck" or "install" or "installRemove" or "installRestore" or "installMode" or "installUpdate") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
         foreach (var (key, value) in request.Extra ?? new Dictionary<string, object?>())
         {
             if (payload.ContainsKey(key)) throw new ArgumentException("Extra field overrides the request envelope: " + key);

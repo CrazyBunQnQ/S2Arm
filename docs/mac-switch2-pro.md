@@ -19,8 +19,13 @@ transport retains its original protocol implementation and license.
 4. Closing the game leaves the controller connected by default. Turn on
    **关闭游戏后自动断开手柄** to disconnect it when a game exits.
 5. The running game's **输入** menu remains a manual fallback:
-   **连接 / 重试 Switch 2 Pro…**. **测试手柄震动** sends a low-strength 250 ms
-   left/right test.
+   **连接 / 重试 Switch 2 Pro…**. **测试手柄震动** sends a 250 ms left/right
+   test through the same rumble mapping as the game.
+
+Switch 2 Pro rumble uses the same strength mapping as other Mac controllers:
+each band's game amplitude passes through `s2a_hp_feel`, then the launch
+setting **震动强度** (`S2A_RUMBLE_SCALE`) multiplies it, capped at 1.
+Frequencies, left/right channels, leases and stop commands are unchanged.
 
 The controller popover has two independent persisted settings:
 **开启 S2Arm 时自动连接手柄** and **关闭游戏后自动断开手柄**. Both default to

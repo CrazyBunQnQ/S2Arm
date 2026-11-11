@@ -20,6 +20,7 @@
     <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
     <InternalsVisibleTo Include="S2A.GpuBufferHoleTest" /> <!-- S2A：带洞多段缓冲提交绑定单测（tests/gpu_bufferhole，BotW qbotw8e NRE） -->
     <InternalsVisibleTo Include="S2A.GpuBufferRecreateTest" /> <!-- S2A：缓冲表合并窗口一致性单测（tests/gpu_bufrecreate，BotW 8E/9000/9400 NRE） -->
+    <InternalsVisibleTo Include="S2A.GpuOmapMaskTest" /> <!-- S2A：颜色写掩码与片元输出映射相与的单测（tests/gpu_omap_mask，#468） -->
   </ItemGroup>
 
   <ItemGroup>

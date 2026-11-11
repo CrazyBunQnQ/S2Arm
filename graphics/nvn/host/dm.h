@@ -48,8 +48,11 @@ void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
 void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Resource count callback (registered by the graphics layer): called every 250 ticks, when the loading screen has been dismissed, and on exit when the record is full
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
-// Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
+// Graphics lifecycle (hle_nvn.c), called by the iOS front end when entering and leaving the background.
+// 进后台分两段：suspend 只关 / 开入口门闸，必须能在 UIKit 通知里立即返回；
+// drain 在有后台执行时间的工作队列上等旧调用退出并排空 GPU。
 void dm_gfx_suspend(int on);
+void dm_gfx_suspend_drain(void);
 // Close the direct submit gate at a fresh guest startup boundary; return an error if any API call is already in flight. This does not drain or submit work.
 int dm_gfx_guest_start_hold(void);
 // S2Arm：游戏线程在图形层里阻塞等 GPU / 上屏 / 管线前后放开 / 取回虚拟核（runtime/src/thread.c，可嵌套、非游戏线程空操作）；直连层等待点各加一行，见 docs/直连图形层_改动清单.md

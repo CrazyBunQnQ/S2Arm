@@ -6,7 +6,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 DN=${DOTNET:-$HOME/.dotnet/dotnet}; [ -x "$DN" ] || DN=$(command -v dotnet || true)
-[ -n "$DN" ] || { echo "不通 没有 dotnet，MSBuild 列不出输入"; exit 1; }
+[ -n "$DN" ] || { echo "nxaot_key：没有 dotnet，MSBuild 列不出输入，没跑（环境未就绪）"; exit 75; }
 DOTNET=$DN python3 "$H/tools/nxaot_inputs.py" "$H" > "$T/in.txt" 2> "$T/in.err"; r=$?
 ck "MSBuild 列出工程闭包输入（rc=${r}，$(grep -c . "$T/in.txt") 个；$(tail -1 "$T/in.err" | cut -c1-120)）" '[ $r = 0 ] && [ "$(grep -c . "$T/in.txt")" -gt 1000 ]'
 bash "$H/services/nxaot.sh" ios-arm64 --files > "$T/key.txt"

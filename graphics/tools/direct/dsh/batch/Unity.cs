@@ -522,7 +522,7 @@ static class Unity
         {
             Store.Open(cas);
             Metal.Init((Priv<string[]>("MacMetal"), Priv<string>("MacRecord"), "macosx"), null, work, nj);
-            Build.Spill = new BlobFile(Path.Combine(work, "spill.dat")); Build.MAC = new Side(work);
+            Build.Spill = new BlobFile(Path.Combine(work, "spill.dat"), compress: true); Build.MAC = new Side(work);
             foreach (var f in Directory.GetFiles(inDir).OrderBy(x => x, StringComparer.Ordinal))
             {
                 string n = Path.GetFileName(f); if (n.Length < 17 || n[16] != '_') continue;

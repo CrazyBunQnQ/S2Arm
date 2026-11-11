@@ -20,7 +20,7 @@ trap 'rm -rf "$out"' EXIT
     "$repo/android/native/nvn/nvn_vk_sampler_cache.c" \
     "$repo/android/native/nvn/nvn_vk_sampler.c" \
     "$repo/android/native/nvn/nvn_vk_format.c" \
-    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/bind_defer.c" "$repo/android/native/direct/vk_clear.c" \
+    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/buffer_texture_plan.c" "$repo/android/native/direct/bind_defer.c" "$repo/android/native/direct/vk_clear.c" \
     "$repo/android/native/nvn/nvn_vk_query.c" \
     "$repo/graphics/nvn/gfx/nvn/nvn_tex.c" "$repo/graphics/nvn/gfx/tex/nvn_deswizzle.c" \
     "$repo/android/native/direct/vk_device.c" -lvulkan -llog -landroid -lm

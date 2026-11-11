@@ -53,6 +53,10 @@
 // svc_mem.c 的锁序断言与背板引用入口（只在 Android 有定义）。
 int s2a_mem_g_mu_held(void);
 void s2a_mem_lockorder_vp_enter(void);
+// #48 A3/A4（android/native/system_tuning.c，只在 Android 有定义）：省电档对最终周期取
+//   max(原周期, 33.3 ms)；登记最终周期给 Surface.setFrameRate 刷新率投票。
+uint64_t s2a_android_limit_frame_period(uint64_t period_ns);
+void s2a_android_present_note(uint64_t period_ns);
 #endif
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
@@ -2357,7 +2361,8 @@ static int frame_rec(void);
 static _Atomic uint64_t g_nvn_ns;   // Host time spent in submit / present this frame (replay encoding + present), used by the timing instrumentation
 
 // ---------- Lifecycle: dm_gfx_suspend (called before iOS goes to the background; equivalent to Switch suspend) ----------
-// on=1: subsequent submits / presents block until on=0; before returning, wait for in-progress submit / present calls to exit and for all in-flight GPU work to complete (iOS requires no GPU work in the background).
+// on=1 only closes the entry gate and must not wait: UIKit's scene-update callback has a 10 second watchdog.
+// dm_gfx_suspend_drain runs on the lifecycle worker with iOS background-task time: wait for calls already inside the gate, then drain GPU work.
 static pthread_mutex_t g_susp_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_susp_cv = PTHREAD_COND_INITIALIZER;
 static int g_susp, g_inflight_api;
@@ -2370,13 +2375,23 @@ void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer
 void dm_gfx_leave(void) { gfx_leave(); }
 __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
 __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
+void (*dm_gfx_test_drain)(void);   // t_nvn_suspend: exercise the real gate / wait without acquiring a Metal device slot
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
-    if (on) while (g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
-    else pthread_cond_broadcast(&g_susp_cv);
+    if (!on) pthread_cond_broadcast(&g_susp_cv);
     pthread_mutex_unlock(&g_susp_mu);
-    if (on) { dm_vk_drain(); dm_gl_drain(); nvn_be_drain(); LOG("[nvn] graphics suspended: in-flight GPU work drained"); } else LOG("[nvn] graphics resumed");   // the Vulkan and GL queues first: presents on the NVN queue wait for their frames
+    if (!on) LOG("[nvn] graphics resumed");
+}
+void dm_gfx_suspend_drain(void) {
+    pthread_mutex_lock(&g_susp_mu);
+    while (g_susp && g_inflight_api) pthread_cond_wait(&g_susp_cv, &g_susp_mu);
+    int suspended = g_susp;
+    pthread_mutex_unlock(&g_susp_mu);
+    if (!suspended) { LOG("【红】[nvn] graphics suspend drain reached after the gate reopened; drain skipped"); return; }
+    if (dm_gfx_test_drain) dm_gfx_test_drain();
+    else { dm_vk_drain(); dm_gl_drain(); nvn_be_drain(); }   // Vulkan and GL first: presents on the NVN queue wait for their frames
+    LOG("[nvn] graphics suspended: in-flight GPU work drained");
 }
 int dm_gfx_guest_start_hold(void) {
     pthread_mutex_lock(&g_susp_mu);
@@ -3368,7 +3383,13 @@ static uint64_t present_period(const win_t *o) {
     }
     int itv = present_itv(o), hz = g_hz;
     // 上限作用于最终周期，不能把基准 60 Hz 降到 30 后再乘 interval（interval 2 会误成 15 帧）。
-    return nvn_fps_period_ns(hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0);
+    uint64_t period = nvn_fps_period_ns(hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0);
+#if defined(__ANDROID__)
+    // #48 A4：系统省电档对最终周期取 max(原周期, 33.3 ms)；A3：登记最终周期给刷新率投票。
+    period = s2a_android_limit_frame_period(period);
+    s2a_android_present_note(period);
+#endif
+    return period;
 }
 // The period the acquire thread declares to the scheduler (set_time_constraint): the present period, except that a hold the frame step raised for late frames keeps the cap's deadline.
 // Declaring the longer hold let the performance controller move the game to the efficiency cores at half the clock (TOTK on an iPhone: 3.4 → 1.5 GHz and 65% → 5% on performance

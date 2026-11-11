@@ -15,6 +15,7 @@
 //     Acquire 不进服务、直接出环（sdk+0x336400；空环 subsdk2 直接中止）；第 k 个发出去的同步句柄由第 k 帧达到，所以帧按登记 / 释放次序填图。
 //   - 同步句柄 NativeSyncHandle = {u32 ~计数器号, u32 模式, u64 值}，模式 1 比 64 位、否则 32 位回绕比；全 0 视为已达到。
 // 解码：VP9 / VP8 用仓库现成的 libvpx（services/vpx/build.sh，垫片 s2a_vp9.c / s2a_vp8.c，与服务层 Nvdec 同源）；AV1 用 VideoToolbox 硬件解码
+//   VP9 默认 libvpx；S2A_VP9_SYSTEM=1（仅 macOS）时整帧改走 VideoToolbox（关键帧解析 → vpcC，420v/420f → I420，失败自动回退 libvpx）
 //   （火纹 82 支片头全是 AV1：2560x1440 78 支、1920x1080 4 支），VideoToolbox 不支持 AV1 的机器（M1 / M2、A16 及更早）用 dav1d 软件解码
 //   （services/dav1d/build.sh，垫片 s2a_av1.c）；S2A_AV1_SOFT=1 强制软解（验收用，缺省关）。H.264 宿主还没接：初始化回失败并打红行（游戏的播放库随即中止），
 //   不出假画面。
@@ -34,6 +35,7 @@
 #include <VideoToolbox/VideoToolbox.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
+#include <TargetConditionals.h>
 
 // services/vpx 的垫片（libs2a_vpx.a：宿主与 iOS App 链直连层时一起链）。NVN 单测链 libnvn.a 不链服务层编解码库：弱引用，按登记放行
 // 弱链接[nvntest]：s2a_vp9_open（services/vpx 提供；宿主 / iOS 照常链上，NVN 单测不链，runtime/build.mk 按这行放行未定义）
@@ -113,7 +115,11 @@ uint32_t nvn2_vi_vsync_event(void *sev, void *disp) {
     pthread_detach(th);
     LOG("vi::GetDisplayVsyncEvent：宿主线程按 60 Hz 触发（自动清除）"); return 0;
 }
-__attribute__((constructor)) static void vi_vsync_reg(void) { nvn2_vi_vsync_register((void *)nvn2_vi_vsync_event); nvn2_sev_attach_register(sev_attach); }
+uint64_t nvn2_chat_video_size(int w, int h, int count); uint32_t nvn2_chat_video_init(void *type, int w, int h, int count, void *buf, uint64_t size);
+void nvn2_chat_video_fini(void *type); uint32_t nvn2_chat_video_handle(const void *type, int i);   // 定义见下（GameChat 摄像头视频存储，#116）
+void nvn2_chat_video_register(void *size, void *init, void *fini, void *handle);   // nvn2.c（声明不放 nvn2.h：别让头文件改动牵动别处）
+__attribute__((constructor)) static void vi_vsync_reg(void) { nvn2_vi_vsync_register((void *)nvn2_vi_vsync_event); nvn2_sev_attach_register(sev_attach);
+    nvn2_chat_video_register((void *)nvn2_chat_video_size, (void *)nvn2_chat_video_init, (void *)nvn2_chat_video_fini, (void *)nvn2_chat_video_handle); }
 
 // ---------- 同步计数器与 nn::syncpt::sdk 事件 ----------
 typedef struct { uint32_t id_inv, mode; uint64_t value; } cv_sync;
@@ -332,6 +338,35 @@ static void cv_pool_fini(cv_pool *pool) {
     memset(pool, 0, sizeof *pool);
 }
 static uint32_t cv_pool_handle(const cv_pool *pool, uint32_t i) { return pool->first + i; }
+// GameChat 摄像头视频存储（nn::chat::Calculate / Initialize / Finalize{Local,Remote}CameraVideo*、Get*CameraImageHandle，nvn2.c chat_entry 调）：#116 马车世界开机就建
+//   本地 / 远端摄像头的图像池，之后按序号取原生图像句柄建 NVN 纹理；没人聊天时这些图像只是从不被写。原先「没在聊」一律回 0，游戏拿句柄 0 调 nvnNativeImageInitialize 后中止（2162-0001）。
+//   语义取自 Splatoon Raiders（0400380020056000）sdk 反汇编：Calculate(宽 32–1920, 高 32–1080, 张数 1–4) 按（宽, 高, 0）的图像偏好算图像池大小；Initialize(类型, 宽, 高, 张数, 缓冲, 大小)
+//   要缓冲与大小 4 KB 对齐、把 224 字节的类型清零后在缓冲里建池；Get(类型, 序号) 取第 i 张的句柄。宿主这里用解码图像同一套池（RGBA 线性，cv_pool 放进类型的前 0x20 字节）
+static int cv_chat_pref(uint32_t pref[3], int w, int h, int count) {
+    if (w < 32 || w > 1920 || h < 32 || h > 1080 || count < 1 || count > 4) { LOG("【红】GameChat 摄像头视频：尺寸 %dx%d、%d 张超出 sdk 的范围（宽 32–1920、高 32–1080、1–4 张）", w, h, count); return 0; }
+    pref[0] = 0; pref[1] = 2; pref[2] = (uint32_t)(w - 1) | (uint32_t)(h - 1) << 16;   // 布局码 2 = RGBA（cv_kind）
+    return 1;
+}
+uint64_t nvn2_chat_video_size(int w, int h, int count) {
+    uint32_t pref[3]; uint64_t size = 0, align = 0;
+    if (!cv_chat_pref(pref, w, h, count) || cv_pool_size(&size, &align, pref, (uint32_t)count) != RES_OK) return 0;
+    return (size + 0xfff) & ~(uint64_t)0xfff;
+}
+uint32_t nvn2_chat_video_init(void *type, int w, int h, int count, void *buf, uint64_t size) {
+    uint32_t pref[3];
+    if (!type) return RES_FAIL;
+    memset(type, 0, 224);
+    if (!cv_chat_pref(pref, w, h, count) || !buf || ((uintptr_t)buf & 0xfff) || (size & 0xfff)) { LOG("【红】GameChat 摄像头视频：缓冲 %p+%#llx 没按 4 KB 对齐或尺寸不对", buf, (unsigned long long)size); return RES_FAIL; }
+    Result r = cv_pool_init((cv_pool *)type, (uint8_t *)buf, size, pref, (uint32_t)count);
+    if (r == RES_OK) { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 4) LOG("GameChat 摄像头视频：建 %d 张 %dx%d 原生图像（句柄 %u 起；没人聊天，从不写入）", count, w, h, ((cv_pool *)type)->first); }
+    return r;
+}
+void nvn2_chat_video_fini(void *type) { if (type && ((cv_pool *)type)->magic == 0x4c4f4f50) cv_pool_fini((cv_pool *)type); }
+uint32_t nvn2_chat_video_handle(const void *type, int i) {
+    const cv_pool *p = type;
+    if (!p || p->magic != 0x4c4f4f50 || i < 0 || (uint32_t)i >= p->count) { LOG("【红】GameChat 摄像头视频：取第 %d 张的句柄，存储没建或序号越界", i); return 0; }
+    return cv_pool_handle(p, (uint32_t)i);
+}
 static Result cv_read_rgba(const cv_pool *pool, uint32_t i, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *dst, uint64_t pitch, uint64_t size) {
     x &= 0xffff; y &= 0xffff; w &= 0xffff; h &= 0xffff;
     cv_img im;
@@ -498,6 +533,61 @@ size_t nvn2_av1c_from_tu(const uint8_t *tu, size_t n, uint8_t *out, size_t cap) 
     return 0;
 }
 
+// ---------- VP9 关键帧 → vpcC（VideoToolbox 的 VP9 格式描述要它，和 AV1 要 av1C 同构）----------
+// 返回 1 = 关键帧且 profile 0 / 8-bit 4:2:0（*full = color_range）；0 = 这包还不是关键帧；-1 = 不支持 / 坏包
+static int nvn2_vp9_kf(const uint8_t *p, size_t n, int *full) {
+    br_t b = { p, n, 0, 0 };
+    if (br_f(&b, 2) != 2) return -1;                     // frame_marker
+    int pl = (int)br_f(&b, 1), ph = (int)br_f(&b, 1);    // profile_low_bit / profile_high_bit
+    int prof = ph << 1 | pl;
+    if (prof == 3) br_f(&b, 1);                          // reserved_zero
+    if (br_f(&b, 1)) return 0;                           // show_existing_frame：没有色彩配置
+    if (br_f(&b, 1) != 0) return 0;                      // frame_type：等关键帧
+    br_f(&b, 1);                                         // show_frame
+    br_f(&b, 1);                                         // error_resilient_mode
+    if (br_f(&b, 24) != 0x498342u) return -1;            // frame_sync_code
+    if (prof != 0) return -1;                            // services/vpx 的垫片只接 8-bit 4:2:0
+    int cs = (int)br_f(&b, 3);                           // color_config：profile 0 没有 ten_or_twelve_bit
+    if (cs == 7) return -1;                              // CS_RGB 只属于 profile 1/3
+    *full = (int)br_f(&b, 1);                            // color_range
+    return b.bad ? -1 : 1;
+}
+
+#if TARGET_OS_OSX
+// vpcC：FullBox version=1 flags=0 + VPCodecConfigurationRecord（profile 0 / level 41 / 8-bit 4:2:0）
+//   色彩字段写「未指定 2/2/2」：实测不影响解码像素，VT 输出的附件仍按码流；range 必须真实（会改变像素值）。
+static OSStatus vp9_vt_fmt(int full, uint32_t w, uint32_t h, CMVideoFormatDescriptionRef *fmt) {
+    uint8_t vpcC[] = { 1, 0, 0, 0, 0, 41, (uint8_t)(0x82 | (full ? 1 : 0)), 2, 2, 2, 0, 0 };
+    CFDataRef cd = CFDataCreate(NULL, vpcC, sizeof vpcC);
+    const void *ak[] = { CFSTR("vpcC") }, *av[] = { cd };
+    CFDictionaryRef atoms = CFDictionaryCreate(NULL, ak, av, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    const void *ek[] = { kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms }, *ev[] = { atoms };
+    CFDictionaryRef ext = CFDictionaryCreate(NULL, ek, ev, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    OSStatus st = CMVideoFormatDescriptionCreate(NULL, kCMVideoCodecType_VP9, w, h, ext, fmt);
+    CFRelease(ext); CFRelease(atoms); CFRelease(cd);
+    return st;
+}
+
+// 本机是否有可用的系统 VP9：注册后实际建一次会话（VTIsHardwareDecodeSupported 建不出会话时也会报 true，不能当判据）
+int nvn2_vp9_vt_probe(void) {
+    if (!__builtin_available(macOS 11.0, *)) return 0;
+    VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9);
+    CMVideoFormatDescriptionRef fmt = NULL;
+    if (vp9_vt_fmt(0, 64, 64, &fmt) || !fmt) return 0;
+    int32_t pf = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    CFNumberRef pfn = CFNumberCreate(NULL, kCFNumberSInt32Type, &pf);
+    const void *bk[] = { kCVPixelBufferPixelFormatTypeKey }, *bv[] = { pfn };
+    CFDictionaryRef attrs = CFDictionaryCreate(NULL, bk, bv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    VTDecompressionSessionRef sess = NULL;
+    OSStatus st = VTDecompressionSessionCreate(NULL, fmt, NULL, attrs, NULL, &sess);
+    CFRelease(attrs); CFRelease(pfn); CFRelease(fmt);
+    if (sess) { VTDecompressionSessionInvalidate(sess); CFRelease(sess); }
+    return st == 0;
+}
+#else
+int nvn2_vp9_vt_probe(void) { return 0; }
+#endif
+
 // ---------- 解码器 ----------
 enum { CV_H264, CV_VP8, CV_VP9, CV_AV1 };
 static const char *const cv_name[] = { "H.264", "VP8", "VP9", "AV1" };
@@ -517,6 +607,8 @@ typedef struct cvdec {
     uint64_t ready_ev;
     // 以下只归解码线程
     int dgen; void *vpx; VTDecompressionSessionRef vt; CMVideoFormatDescriptionRef vtfmt; int vt_nv12;
+    // VP9 系统后端（S2A_VP9_SYSTEM=1，仅 macOS）：vpcC 的范围 / VT 输出解交织缓冲（420v/420f → I420）
+    int vp9_system, vp9_no_vt, vp9_full, vp9_vt_used; uint8_t *vt_u, *vt_v; size_t vt_uv_cap;
     // dav1d 软件解码（AV1 在 VideoToolbox 不支持 / 强制软解时）
     void *av1; int av1_soft;
     struct { CVPixelBufferRef pb; } vtout[4]; int nvtout;
@@ -596,6 +688,12 @@ static void vt_out(void *ref, void *src, OSStatus st, VTDecodeInfoFlags fl, CVIm
 static int cv_threads(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n >= 8 ? 4 : 2; }
 // S2A_AV1_SOFT=1：AV1 强制走 dav1d（有硬件的机器上验收软解用；缺省关）
 static int av1_soft_forced(void) { const char *e = getenv("S2A_AV1_SOFT"); return e && !strcmp(e, "1"); }
+// S2A_VP9_SYSTEM=1：nn::codec 的整帧 VP9 走 macOS VideoToolbox（仅 macOS；默认 libvpx，失败自动回退）
+#if TARGET_OS_OSX
+static int vp9_system_enabled(void) { const char *e = getenv("S2A_VP9_SYSTEM"); return e && !strcmp(e, "1"); }
+#endif
+static _Atomic unsigned long long g_vp9_vt_frames;
+unsigned long long nvn2_vp9_vt_frames(void) { return atomic_load(&g_vp9_vt_frames); }
 static void cv_soft_open(cvdec *d, const char *why) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (!s2a_av1_open) die("Switch 2 视频：宿主没链 dav1d 垫片（services/dav1d），解不了 AV1（%dx%d）", d->w, d->h);
@@ -626,10 +724,106 @@ static int cv_vt_open(cvdec *d, const uint8_t *p, size_t n) {
     LOG("Switch 2 视频：AV1 %dx%d 走 VideoToolbox 硬件解码（av1C %zu 字节，输出 %s）", d->w, d->h, an, d->vt_nv12 ? "NV12" : "BGRA→RGBA");
     return 1;
 }
+#if TARGET_OS_OSX
+// 返回 1 = 会话建好；0 = 这包还不是关键帧（先不出画面）；-1 = 不支持 / 建不出（调用方回 libvpx）
+static int cv_vt_open_vp9(cvdec *d, const uint8_t *p, size_t n) {
+    int full = 0;
+    int k = nvn2_vp9_kf(p, n, &full);
+    if (k <= 0) return k;
+    if (!__builtin_available(macOS 11.0, *)) return -1;
+    VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9);
+    CMVideoFormatDescriptionRef fmt = NULL;
+    OSStatus st = vp9_vt_fmt(full, (uint32_t)d->w, (uint32_t)d->h, &fmt);
+    if (st || !fmt) { LOG("Switch 2 视频：VP9 的 vpcC/格式描述建不出（%d），改走 libvpx", (int)st); return -1; }
+    int32_t pf = full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    CFNumberRef pfn = CFNumberCreate(NULL, kCFNumberSInt32Type, &pf);
+    const void *bk[] = { kCVPixelBufferPixelFormatTypeKey }, *bv[] = { pfn };
+    CFDictionaryRef attrs = CFDictionaryCreate(NULL, bk, bv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    VTDecompressionOutputCallbackRecord cb = { vt_out, d };
+    st = VTDecompressionSessionCreate(NULL, fmt, NULL, attrs, &cb, &d->vt);
+    CFRelease(attrs); CFRelease(pfn);
+    if (st) { CFRelease(fmt); LOG("Switch 2 视频：VP9 的 VideoToolbox 会话建不出（%d），改走 libvpx", (int)st); return -1; }
+    d->vtfmt = fmt; d->vp9_full = full; d->vp9_vt_used = 1;
+    LOG("Switch 2 视频：VP9 %dx%d 走 VideoToolbox（vpcC 12 字节，%s范围）", d->w, d->h, full ? "全" : "视频");
+    return 1;
+}
+
+// VT 输出 NV12（420v/420f）→ 解交织成 U/V 两份，交给现有 pic_to_img：NV12 / RGBA 图像池、BT.601/709、全/视频范围都和 libvpx 同一条路
+static int cv_vp9_vt_emit(cvdec *d, CVPixelBufferRef pb, int64_t pts, int gen) {
+    if (CVPixelBufferGetPlaneCount(pb) < 2) { CV_RED(vp9fmt, "Switch 2 视频：VP9 的 VideoToolbox 输出不是双平面（这一包没有画面）"); return 1; }
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), cw = (w + 1) / 2, ch = (h + 1) / 2;
+    if (d->vt_uv_cap < cw * ch) {
+        uint8_t *u = malloc(cw * ch), *v = malloc(cw * ch);
+        free(d->vt_u); free(d->vt_v); d->vt_u = u; d->vt_v = v;
+        d->vt_uv_cap = u && v ? cw * ch : 0;
+    }
+    if (!d->vt_uv_cap) { CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly); CV_RED(vp9mem, "Switch 2 视频：VP9 系统解码的色度缓冲分配不出（这一包没有画面）"); return 1; }
+    const uint8_t *uv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+    size_t uvp = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+    for (size_t r = 0; r < ch; r++) {
+        const uint8_t *s = uv + r * uvp; uint8_t *u = d->vt_u + r * cw, *v = d->vt_v + r * cw;
+        for (size_t x = 0; x < cw; x++) { u[x] = s[2 * x]; v[x] = s[2 * x + 1]; }
+    }
+    // 矩阵：VT 按码流给附件；没有附件时沿用 libvpx 的同一启发（>=720 行 BT.709）
+    int m = -1;
+    CFTypeRef a = CVBufferCopyAttachment(pb, kCVImageBufferYCbCrMatrixKey, NULL);
+    if (a) { if (CFGetTypeID(a) == CFStringGetTypeID()) m = CFEqual(a, kCVImageBufferYCbCrMatrix_ITU_R_709_2) ? 1 : 0; CFRelease(a); }
+    cv_pic pic = { { CVPixelBufferGetBaseAddressOfPlane(pb, 0), d->vt_u, d->vt_v },
+                   { (int)CVPixelBufferGetBytesPerRowOfPlane(pb, 0), (int)cw, (int)cw },
+                   (int)w, (int)h, d->vp9_full, m == 1 || (m < 0 && d->h >= 720), 8, 1, 1, 0 };
+    int ok = cv_emit(d, wr_pic, &pic, (uint16_t)w, (uint16_t)h, pts, 0, gen);
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    if (ok) atomic_fetch_add(&g_vp9_vt_frames, 1);
+    return ok;
+}
+
+// 返回 1 = VT 已处理（包括成功但没画面）；0 = 本包没走 VT（调用方走 libvpx）
+static int cv_vp9_vt_decode(cvdec *d, const cv_in *in, int64_t pts, int gen) {
+    if (!d->vt) {
+        int r = cv_vt_open_vp9(d, in->p, in->n);
+        if (r < 0) { d->vp9_no_vt = 1; CV_RED(vp9vt, "Switch 2 视频：VP9 的 VideoToolbox 后端不可用（%dx%d），改走 libvpx（到下一个关键帧前可能没有画面）", d->w, d->h); return 0; }
+        if (r == 0) { CV_RED(vp9kf, "Switch 2 视频：VP9 系统后端还没收到关键帧（这一包没有画面）"); return 1; }
+    }
+    uint8_t *s = malloc(in->n); if (!s) { CV_RED(vp9mem, "Switch 2 视频：VP9 系统解码的包缓冲分配不出（这一包没有画面）"); return 1; }
+    memcpy(s, in->p, in->n);
+    CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, s, in->n, kCFAllocatorMalloc, NULL, 0, in->n, 0, &bb);
+    if (st) free(s);
+    size_t ss = in->n;
+    CMSampleTimingInfo ti = { kCMTimeInvalid, CMTimeMake(in->pts_ns / 1000, 1000000), kCMTimeInvalid };
+    if (!st) st = CMSampleBufferCreateReady(NULL, bb, d->vtfmt, 1, 1, &ti, 1, &ss, &sb);
+    uint64_t t0 = now_ns();
+    if (!st) st = VTDecompressionSessionDecodeFrame(d->vt, sb, 0, NULL, NULL);
+    if (!st) st = VTDecompressionSessionWaitForAsynchronousFrames(d->vt);
+    if (sb) CFRelease(sb);
+    if (bb) CFRelease(bb);
+    dec_time(d, t0);
+    if (st) {
+        d->vp9_no_vt = 1;
+        cv_vt_drop(d);
+        CV_RED(vp9dec, "Switch 2 视频：VP9 VideoToolbox 解码失败（%d），改走 libvpx（到下一个关键帧前可能没有画面）", (int)st);
+        return 0;
+    }
+    for (int i = 0; i < d->nvtout; i++) {
+        CVPixelBufferRef pb = d->vtout[i].pb;
+        int ok = cv_vp9_vt_emit(d, pb, pts, gen);
+        CVPixelBufferRelease(pb);
+        if (!ok) { for (int k = i + 1; k < d->nvtout; k++) CVPixelBufferRelease(d->vtout[k].pb); d->nvtout = 0; return 1; }
+    }
+    d->nvtout = 0;
+    return 1;
+}
+#endif // TARGET_OS_OSX
+
 static void cv_decode(cvdec *d, const cv_in *in, int gen) {
     // SDK 按微秒发（sdk+0x336260），按 微秒 × 1000 报
     int64_t pts = in->pts_ns / 1000 * 1000;
-    if (in->n && (d->codec == CV_VP9 || d->codec == CV_VP8)) {
+    int vt_handled = 0;
+#if TARGET_OS_OSX
+    if (in->n && d->codec == CV_VP9 && d->vp9_system && !d->vp9_no_vt) vt_handled = cv_vp9_vt_decode(d, in, pts, gen);
+#endif
+    if (!vt_handled && in->n && (d->codec == CV_VP9 || d->codec == CV_VP8)) {
         if (!d->vpx && !s2a_vp9_open) die("Switch 2 视频：宿主没链 libvpx 垫片（services/vpx），解不了 %s", cv_name[d->codec]);
         if (!d->vpx && !(d->vpx = d->codec == CV_VP9 ? s2a_vp9_open(cv_threads()) : s2a_vp8_open())) die("Switch 2 视频：libvpx 建不出 %s 解码器", cv_name[d->codec]);
         uint8_t *pl[3]; int32_t st[3], info[4] = { 0, 0, -1, 0 }; uint64_t t0 = now_ns();
@@ -639,7 +833,7 @@ static void cv_decode(cvdec *d, const cv_in *in, int gen) {
             cv_pic pic = { { pl[0], pl[1], pl[2] }, { st[0], st[1], st[2] }, info[0], info[1], info[3], info[2] == 1 || (info[2] < 0 && d->h >= 720), 8, 1, 1, 0 };
             cv_emit(d, wr_pic, &pic, (uint16_t)info[0], (uint16_t)info[1], pts, 0, gen);
         } else if (r < 0) CV_RED(vpxerr, "Switch 2 视频：%s 解码失败（%s，首个 %zu 字节）：这一包没有画面", cv_name[d->codec], r == -2 ? "不是 8 位 4:2:0" : "libvpx 报错", in->n);
-    } else if (in->n && d->codec == CV_AV1) {
+    } else if (!vt_handled && in->n && d->codec == CV_AV1) {
         if (!d->vt && !d->av1) {
             if (av1_soft_forced()) cv_soft_open(d, "S2A_AV1_SOFT=1 强制");
             else if (!VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)) cv_soft_open(d, "这台机器 VideoToolbox 不支持 AV1");
@@ -722,6 +916,10 @@ static Result cv_init(void *t, int codec, uint32_t w, uint32_t h) {
     if (codec == CV_H264) { LOG("【红】Switch 2 视频：H.264 解码器（%ux%u）宿主还没接：初始化回失败", w, h); return RES_FAIL; }
     cvdec *d = calloc(1, sizeof *d); if (!d) die("Switch 2 视频：内存不足");
     d->guest = t; d->codec = codec; d->w = (int)w; d->h = (int)h; d->last = -1;
+#if TARGET_OS_OSX
+    d->vp9_system = codec == CV_VP9 && vp9_system_enabled();
+    if (d->vp9_system) LOG("Switch 2 视频：VP9 系统解码开关 S2A_VP9_SYSTEM=1（VideoToolbox，失败回退 libvpx）");
+#endif
     d->qcap = 64; d->q = calloc((size_t)d->qcap, sizeof *d->q);
     pthread_mutex_init(&d->mu, NULL); pthread_cond_init(&d->cv, NULL);
     d->ctr = sp_alloc(); d->handed = sp_value(d->ctr);
@@ -743,7 +941,7 @@ static void cv_fini(void *t) {
     pthread_mutex_lock(&g_dec_mu); for (int i = 0; i < 64; i++) if (g_dec[i] == d) g_dec[i] = NULL; pthread_mutex_unlock(&g_dec_mu);
     pthread_mutex_lock(&d->mu); d->quit = 1; pthread_cond_broadcast(&d->cv); pthread_mutex_unlock(&d->mu);
     DM_BLOCK_BEGIN(); pthread_join(d->th, NULL); DM_BLOCK_END();
-    cv_reset_codec(d); cv_drop_inputs(d); free(d->q);
+    cv_reset_codec(d); cv_drop_inputs(d); free(d->q); free(d->vt_u); free(d->vt_v);
     sp_free(d->ctr);
     static void (*destroy)(void *);
     if (!destroy) destroy = (void (*)(void *))gsym("_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE");
@@ -751,7 +949,8 @@ static void cv_fini(void *t) {
     destroy((uint8_t *)t + 8);
     s2a_event_release(d->ready_ev);
     LOG("Switch 2 视频：%s 解码器结束，出帧 %llu；解码 %llu 包，每包平均 %.2f ms、最长 %.2f ms；写进图像每帧平均 %.2f ms（%s）", cv_name[d->codec], (unsigned long long)d->frames, (unsigned long long)d->dec_n,
-        d->dec_n ? d->dec_ns / 1e6 / (double)d->dec_n : 0.0, d->dec_max / 1e6, d->wr_n ? d->wr_ns / 1e6 / (double)d->wr_n : 0.0, d->codec != CV_AV1 ? "libvpx" : d->av1_soft ? "dav1d 软件解码" : "VideoToolbox");
+        d->dec_n ? d->dec_ns / 1e6 / (double)d->dec_n : 0.0, d->dec_max / 1e6, d->wr_n ? d->wr_ns / 1e6 / (double)d->wr_n : 0.0,
+        d->codec == CV_AV1 ? (d->av1_soft ? "dav1d 软件解码" : "VideoToolbox") : d->codec == CV_VP9 && d->vp9_vt_used && !d->vp9_no_vt ? "VideoToolbox" : "libvpx");
     pthread_mutex_destroy(&d->mu); pthread_cond_destroy(&d->cv); free(d);
 }
 // 持 mu：登记 / 释放的缓冲拿下一个句柄，进两条次序

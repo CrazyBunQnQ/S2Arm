@@ -219,7 +219,7 @@ GL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig c, EGLContext share, co
     x->st.stencil_wmask[0] = x->st.stencil_wmask[1] = ~0u;
     for (int i = 0; i < 2; i++) { x->st.stencil_func[i] = 0x0207; /* GL_ALWAYS */ x->st.stencil_mask[i] = ~0u; x->st.stencil_op[i][0] = x->st.stencil_op[i][1] = x->st.stencil_op[i][2] = 0x1E00; /* GL_KEEP */ }
     x->st.depth_range[1] = 1; x->st.clear_depth = 1; x->st.depth_func = 0x0201; /* GL_LESS */ x->st.cull = 0x0405; /* GL_BACK */ x->st.front = 0x0901; /* GL_CCW */
-    x->st.unpack_align = 4; x->st.unpack_row = 0; x->st.pack_align = 4; x->st.line_width = 1; // #272：每个上下文独立的 GL 初始像素存储。
+    x->st.unpack_align = 4; x->st.unpack_row = 0; x->st.pack_align = 4; x->st.line_width = 1; x->st.point_size = 1; // #272：每个上下文独立的 GL 初始像素存储。
     x->st.default_read = 0x0405; /* GL_BACK */ x->st.poly_mode = 0x1B02; /* GL_FILL */
     for (int i = 0; i < 16; i++) x->st.attr_cur[i][3] = 1;   // 当前通用顶点属性初值 (0, 0, 0, 1)
     x->st.dirty = ~0u;

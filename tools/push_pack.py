@@ -53,7 +53,9 @@ from pathlib import Path
 
 R = Path(__file__).resolve().parents[1]
 LIM = 1 << 30
-IMG = re.compile(r"(^|.*/)romfs\.img$")   # 单文件镜像：直接写到最终路径，不进 tar、不用首启解开
+IMG = re.compile(r"(^|.*/)romfs\.img$|game\.img")   # 单文件镜像（旧形态 romfs.img / v0.3.0 单一 IMG game.img，pack/img.py）：直接写到最终路径，不进 tar、不用首启解开
+IMG_PAGE = 16384   # 单一 IMG 的页（pack/img.py PAGE）：第 0 页是头，续传按页向下取整接着写
+IMG_PACK_ID = slice(32, 96)   # 头里的资源包号（ASCII，可空）：空 = 认不出是不是同一份，不续传
 DOCS = "Documents"   # 设备侧文档根（单款 App）；多款容器每款 Documents/games/<游戏号>（pack/ship_ext.py 容器布局），设备对象的 docs 属性
 
 
@@ -99,7 +101,7 @@ class Devpush:
     def call(self, *args):
         try:
             cmd = [self.exe, self.udid, self.bid, *map(str, args)]
-            if self.progress is not None and args[0] in ("put", "put-tar"):
+            if self.progress is not None and args[0] in ("put", "put-tar", "put-at"):
                 env = dict(os.environ if self.env is None else self.env, S2A_DEVPUSH_PROGRESS="1")
                 tail = deque(maxlen=20)
                 # 合并 stderr 持续排空，避免任一管道写满；老工具忽略环境变量，照常只报批末进度。
@@ -146,6 +148,19 @@ class Devpush:
         return rc == 0, out
 
     put_big = put
+
+    def head(self, rel, n):   # 机上文件的（长度, 开头至多 n 字节）；不在 → (-1, b"")；工具太旧不认 head / 读不了 → None（调用方不续传）
+        dst = self.work / "head.bin"; dst.unlink(missing_ok=True)
+        rc, out = self.call("head", rel, n, dst)
+        m = re.search(r"^head (-?\d+)$", out, re.M) if rc == 0 else None
+        if not m: return None
+        size = int(m[1])
+        return (size, dst.read_bytes() if size >= 0 and dst.is_file() else b"")
+
+    def put_at(self, src, rel, off):   # 本地从 off 起接着写进机上同一文件的 off 处（不截短）
+        rc, out = self.call("put-at", src, rel, off)
+        if rc:
+            raise Fail(f"资源包写进 iPhone 时中断（{out.splitlines()[-1] if out else f'退出码 {rc}'}）：确认手机解锁、数据线插稳后再点一次")
 
     def tar_ok(self, rel):
         rc, out = self.call("tar-ok", rel)
@@ -237,6 +252,13 @@ class Devicectl:
             except Fail as e:
                 self.say(f"流式写 {Path(rel).name} 没成（{str(e)[-160:]}），改走 devicectl")
         self.put(src, rel)
+
+    def head(self, rel, n):   # 续传只走 s2a-devpush（devicectl 读不了文件的一段）
+        return self.dp.head(rel, n) if self.dp else None
+
+    def put_at(self, src, rel, off):
+        if not self.dp: raise Fail("没有 s2a-devpush，续传不了")
+        return self.dp.put_at(src, rel, off)
 
     def ls(self, rel):
         rc, out = self.dcp(60, "device", "info", "files", *self.container(), "--subdirectory", rel, "--no-recurse")
@@ -386,7 +408,13 @@ def plan(dev, pack, work, full=False, say=print):
         if have: have = spot_check(dev, pack, work, have, say)
         cut_img = [r for r in have if IMG.fullmatch(r)]   # 账上有镜像才去机上核：没有镜像的包不多一次设备往返
         if cut_img and not (read(dev, f"{rp(dev)}/.applied", work, "r.applied.pre") or "").strip():   # send 写镜像前把 .applied 清空：空 = 上次传镜像被打断，机上那份不完整，账不能信
-            say(f"上次传 {cut_img[0]} 被打断，这次重传"); have = {r: h for r, h in have.items() if r not in cut_img}
+            # 例外：.pushed 里记着这份镜像 = 上次已整份传完（put_big 成功后才记账），.applied 空只是后面解包没成（#457：原先照样打「被打断，这次重传」，
+            #   实际按 .pushed 不重传、推送 0 个文件，日志自相矛盾，把排查带偏）。这时如实说镜像已传完、问题在解包
+            done = [r for r in cut_img if pushed.get(r) == have[r]]
+            if done: say(f"{done[0]} 上次已整份传完（推送账上有），不重传；上次是机上解包没成，见手机上的 unpack.log")
+            redo = [r for r in cut_img if r not in done]
+            if redo: say(f"上次传 {redo[0]} 被打断，这次重传")
+            have = {r: h for r, h in have.items() if r not in redo}
     want = [w for w in (l.split("\t") for l in (pack / "index.tsv").read_text(encoding="utf-8").splitlines()) if len(w) == 3]
     acct = {**have, **pushed}
     todo = [w for w in want if acct.get(w[0]) != w[2]]
@@ -443,6 +471,18 @@ def space(dev, nbytes, work, env=None):
 PROGRESS_PREFIX = "S2A_PUSH_PROGRESS"   # --progress-lines 打的机器读行：S2A_PUSH_PROGRESS <已传字节> <本次待传总字节> <已完成批次> <总批次>
 
 
+def resume_offset(dev, src, rel, size):
+    """单一 IMG（game.img）断点续传的起点：机上已有这份的前一部分 → 按页向下取整的字节数；从头写 → 0。
+    同一份的判据：机上开头一整页（IMG 头：游戏号、资源包号、各段偏移、整个文件长）与本地逐字节相同，且头里的资源包号不空；
+    机上比本地长、读不了机上（工具太旧 / devicectl 退路）、旧形态 romfs.img（没有这种头）都从头写"""
+    if Path(src).name != "game.img" or not hasattr(dev, "head"): return 0
+    got = dev.head(rel, IMG_PAGE)
+    if not got or got[0] < 2 * IMG_PAGE or got[0] > size: return 0
+    with open(src, "rb") as f: mine = f.read(IMG_PAGE)
+    if got[1] != mine or not mine[IMG_PACK_ID].strip(b"\0"): return 0
+    return min(got[0] // IMG_PAGE * IMG_PAGE, size)
+
+
 def send(dev, pack, work, say=print, progress=None):
     """推 plan 写好的批次 → 推了几批；每批写完才把它的文件记进 .pushed 并推上机；最后推索引与清单。
     progress(已传字节, 本次待传总字节, 已完成批次, 总批次)：流式工具按秒报文件 / 批内进度，旧工具与 devicectl 退路仍按批报（#266）。
@@ -492,14 +532,27 @@ def send(dev, pack, work, say=print, progress=None):
         try: dev.put(e, f"{rp(dev)}/.applied")
         finally: e.unlink(missing_ok=True)
     for w in direct:
-        t1 = time.time()
+        t1 = time.time(); size, rel = int(w[1]), f"{rp(dev)}/{w[0]}"
+        off = resume_offset(dev, pack / w[0], rel, size)
         try:
-            transfer(dev.put_big, pack / w[0], f"{rp(dev)}/{w[0]}", size=int(w[1]))
+            if off:
+                say(f"  续传 {w[0]}：机上已有同一份的前 {off / 1e9:.2f} GB，从这里接着写")
+                done += off
+                try:
+                    transfer(dev.put_at, pack / w[0], rel, off, size=size - off)
+                except Fail as e:
+                    say(f"  续传 {w[0]} 没成（{str(e)[-160:]}），改为整份重写"); done -= off; off = 0
+                    transfer(dev.put_big, pack / w[0], rel, size=size)
+                if off and (dev.head(rel, 0) or (None,))[0] != size:   # 续写不截短：写完核机上总长，对不上不记账（App 也按头里整长判没传完）
+                    raise Fail(f"续传后机上 {w[0]} 长度不对")
+            else:
+                transfer(dev.put_big, pack / w[0], rel, size=size)
         except Fail as e:
             if dev.nospc(): raise Fail(f"测试设备空间不足（推 {w[0]} 时 POSIX 28）")
-            say(f"【红】传 {w[0]} 中断（{e}）；机上这份不完整，不会被当成可用，重新装机会从头重传")
-            raise Fail(f"资源传输中断：{w[0]} 没传完，重新装到 iPhone 会从头再传一次")
-        done += int(w[1]); nt += 1; ledger += f"{w[0]}\t{w[2]}\n"; led.write_text(ledger, encoding="utf-8"); dev.put(led, f"{rp(dev)}/.pushed")
+            again = "接着已传的部分续传" if w[0] == "game.img" else "从头重传"
+            say(f"【红】传 {w[0]} 中断（{e}）；机上这份不完整，不会被当成可用，重新装机会{again}")
+            raise Fail(f"资源传输中断：{w[0]} 没传完，重新装到 iPhone 会{again}")
+        done += size - off; nt += 1; ledger += f"{w[0]}\t{w[2]}\n"; led.write_text(ledger, encoding="utf-8"); dev.put(led, f"{rp(dev)}/.pushed")
         say(f"  直写 {w[0]}：{int(w[1]) / 1e9:.2f} GB，{time.time() - t1:.0f} 秒，{int(w[1]) / 1e6 / max(time.time() - t1, 1e-3):.1f} MB/s")
         step += 1
         if progress: progress(done, total, step, steps)

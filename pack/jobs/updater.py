@@ -202,7 +202,7 @@ def query_latest(platform, current):
 
 
 NOTICE_URL = "https://jhaizhou-ops.github.io/S2Arm/notice.json"   # docs/site/notice.json，Pages 发布（docs/site/README.md）
-NOTICE_LINK_HOSTS = ("github.com", "jhaizhou-ops.github.io")
+NOTICE_LINK_HOSTS = ("github.com", "jhaizhou-ops.github.io", "s2arm.com")   # 11-10 起 s2arm.com 是官方网站
 
 
 def notice_file():

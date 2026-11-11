@@ -30,6 +30,13 @@ int s2a_ql_why(void);
 int s2a_ql_stable_now(void);
 // 最近一次判定窗口的读数（换档日志用）
 void s2a_ql_last(double *fps, double *slow_pct, double *gpu_pct, int *thermal);
+// 梯子换档压回 / 放开 60 帧时要不要告诉玩家（审计 P1-80 原因 4：原先梯子压帧不弹横幅，60 帧开关显示开着、画面已回原帧率，玩家不知道为什么）：
+//   回 4 = 「本机暂时跑不稳 60 帧，已回原帧率」，0 = 「60 帧恢复」，-1 = 不说。起局按上次稳定档摆好那一下不说（每次开游戏都弹就成了噪音）、
+//   压没变不说、玩家没开 60 帧不说（同热 / 低电量降档）、自动化局只记日志
+static inline int s2a_ql_fps_note(int boot, int last_hold, int hold, int fps_on, int unattended) {
+    if (boot || last_hold < 0 || hold == last_hold || !fps_on || unattended) return -1;
+    return hold ? 4 : 0;
+}
 #ifdef __cplusplus
 }
 #endif

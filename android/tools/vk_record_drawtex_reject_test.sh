@@ -43,7 +43,7 @@ inc="-I $android/native -I $android/native/direct -I $android/native/nvn
 "$cc_bin" -std=gnu11 -O1 -Wall -Wextra -Werror $inc \
   -c "$android/tests/vk_record_drawtex_reject_test.c" -o "$tmp/test.o"
 objs=()
-for src in "$android/native/direct/vk_record.c" "$android/native/direct/vk_clear.c" "$android/native/direct/t2t_plan.c" \
+for src in "$android/native/direct/vk_record.c" "$android/native/direct/vk_clear.c" "$android/native/direct/t2t_plan.c" "$android/native/direct/buffer_texture_plan.c" \
            "$android/native/nvn/nvn_vk_query.c" "$android/native/nvn/nvn_vk_format.c"; do
     obj="$tmp/$(basename "$src" .c).o"
     # shellcheck disable=SC2086

@@ -49,12 +49,6 @@ int s2a_ui_zh(void);
 #define S2A_UI_PACK_NONE_DETAIL         "这个 App 只是游戏的「外壳」，游戏本身在电脑上 S2Arm 打包得到的「资源包」里，手机上还没找到它。照下面做，放好后这里会自动继续。"
 #define S2A_UI_PACK_NONE_DETAIL_EN      "This app is only the game’s “shell”. The game itself is in the “资源包” folder that S2Arm on your computer packaged, and it isn’t on the phone yet. Follow the steps below; this continues automatically once it’s in place."
 
-// ---------- 画面档位横幅（runtime/src/qladder_host.c → ios/app.m s2a_ios_ladder_note） ----------
-#define S2A_UI_LADDER_UP                "画面档位已调高，下次启动游戏生效"
-#define S2A_UI_LADDER_UP_EN             "Graphics level raised. Takes effect the next time you start the game."
-#define S2A_UI_LADDER_DOWN              "已调到掌机档以保持流畅，下次启动游戏生效"
-#define S2A_UI_LADDER_DOWN_EN           "Switched to Handheld level to keep things smooth. Takes effect the next time you start the game."
-
 // ---------- 画面停住提示（runtime/src/ap_host.c → ios/app.m s2a_ios_show_message：第一段当标题） ----------
 #define S2A_UI_STALL_EXIT               "游戏画面卡住了\n\n请从后台划掉本 App，再重新打开。还是卡住的话，四指长按屏幕打开设置，导出诊断包发给我们。"
 #define S2A_UI_STALL_EXIT_EN            "The game picture is stuck\n\nSwipe this app away in the app switcher and open it again. If it’s still stuck, hold four fingers on the screen to open Settings, then export diagnostics and send them to us."

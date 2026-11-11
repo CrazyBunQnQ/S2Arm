@@ -82,6 +82,12 @@ public final class S2ArmShellHostModel {
         }
         self.now = now
         self.pickGameData = pickGameData ?? { id in id.withCString { s2a_shell_pick_game_data($0) } }
+        let savedOrder = stores.app.stringArray(forKey: "S2ALibraryOrder") ?? []
+        var remaining = allGames
+        allGames = savedOrder.compactMap { id in
+            guard let index = remaining.firstIndex(where: { $0.id == id }) else { return nil }
+            return remaining.remove(at: index)
+        } + remaining
         for tile in catalogue.tiles { applyIdentity(tile.id) }
         for p in catalogue.problems { NSLog("S2Arm 游戏库：%@", p) }
         refreshGameData()
@@ -204,12 +210,31 @@ public final class S2ArmShellHostModel {
     }
 
     public var actions: ShellActions {
-        ShellActions(onPlay: { [weak self] id in self?.requestPlay(id) },
+        var actions = ShellActions(onPlay: { [weak self] id in self?.requestPlay(id) },
                      onChange: { [weak self] id, setting, value in self?.change(id, setting, value) },
                      onPickGameData: { [weak self] id in self?.requestGameData(id) },
                      onPickShellCloud: Self.pickCloudFolder, onClearShellCloud: Self.pickCloudFolder == nil ? nil : { CloudSaves.forget() },
                      onButtonTest: { [weak self] open in self?.buttonTest(open) },
                      onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) })
+        actions.onReorderGames = { [weak self] sources, before in self?.reorderGames(sources, before: before) ?? false }
+        return actions
+    }
+
+    /// Native reordering supplies stable IDs and an insertion point after the drag finishes.
+    private func reorderGames(_ sources: [String], before destination: String?) -> Bool {
+        let moving = Set(sources)
+        let visible = Set(games.map(\.id))
+        guard !sources.isEmpty, moving.count == sources.count, moving.isSubset(of: visible) else { return false }
+        if let destination {
+            guard visible.contains(destination), !moving.contains(destination) else { return false }
+        }
+        let entries = Dictionary(uniqueKeysWithValues: allGames.map { ($0.id, $0) })
+        var reordered = allGames.filter { !moving.contains($0.id) }
+        let insertion = destination.flatMap { id in reordered.firstIndex { $0.id == id } } ?? reordered.count
+        reordered.insert(contentsOf: sources.compactMap { entries[$0] }, at: insertion)
+        allGames = reordered
+        stores.app.set(allGames.map(\.id), forKey: "S2ALibraryOrder")
+        return true
     }
 
     /// 库设置「云存档 → 选择文件夹…」（iCloud 存档同步，见 CloudSaves.swift）：iOS 弹系统文件夹选择器；Mac 上跑单测时没有界面

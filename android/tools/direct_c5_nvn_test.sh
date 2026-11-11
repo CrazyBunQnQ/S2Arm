@@ -58,6 +58,7 @@ compile android/native/direct/sha256.c sha256
 compile android/native/direct/vk_device.c vk_device
 compile android/native/direct/vk_record.c vk_record
 compile android/native/direct/t2t_plan.c t2t_plan
+compile android/native/direct/buffer_texture_plan.c buffer_texture_plan
 compile android/native/direct/bind_defer.c bind_defer
 compile android/native/nvn/nvn_vk_query.c nvn_vk_query
 compile android/native/nvn/nvn_vk_format.c nvn_vk_format

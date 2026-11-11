@@ -27,6 +27,8 @@
 #include "nvn_vk_snap_pool.h"
 #include "nvn_vk_query_retire.h"
 #include "nvn_vk_pipe_recipe.h"
+#include "nvn_vk_pipe_worker.h"
+#include "nvn_first_use.h"
 #include "nvn_vk_driver_cache.h"
 #include "nvn_vk_draw_diag.h"
 #include "nvn_vk_pipe_manifest.h"
@@ -1197,6 +1199,27 @@ static int fd_present_defer(void) {
     return v;
 }
 int nvn_vk_first_draw_present_deferred(void) { return fd_present_defer(); }
+// 逐帧 drain 账：本文件每一次真等 fence 都过这一站，记进与 vk_record.c submit() /
+// vk_clear.c 相同的 frame_log + frame_tsv 双账（fence_n = 每帧排空次数、fence_wait_us =
+// 累计等待时长）。门开才计时记账，关着只剩一次空指针分支；等待超时也照记——CPU 被阻塞
+// 的时长是事实，不挑结果。
+static VkResult fd_fence_wait(struct s2a_vk_device *d, VkFence fence, uint64_t timeout_ns) {
+    extern int nvn_vk_frame_log_on(void) __attribute__((weak));
+    extern void nvn_vk_frame_log_fence_wait(uint64_t) __attribute__((weak));
+    extern int nvn_vk_frame_tsv_on(void) __attribute__((weak));
+    extern void nvn_vk_frame_tsv_fence_wait(uint64_t) __attribute__((weak));
+    const int fl = nvn_vk_frame_log_on && nvn_vk_frame_log_on();
+    const int ft = nvn_vk_frame_tsv_on && nvn_vk_frame_tsv_on();
+    const int64_t t0 = (fl || ft) ? fd_now_ns() : 0;
+    VkResult r = vkWaitForFences(d->device, 1, &fence, VK_TRUE, timeout_ns);
+    if (fl || ft) {
+        const uint64_t wt_ns = (uint64_t)(fd_now_ns() - t0);
+        if (fl) nvn_vk_frame_log_fence_wait(wt_ns);
+        if (ft) nvn_vk_frame_tsv_fence_wait(wt_ns);
+    }
+    return r;
+}
+
 // 释放快照队列持有的 Vulkan 对象（不碰 arena/pool/pin：那些归帧边界处理）。
 static void fd_slot_release(struct s2a_vk_device *d, struct fd_frame_q *q) {
     if (!d || !d->device) return;
@@ -1236,9 +1259,9 @@ static int fd_slot_retire(struct s2a_vk_device *d, struct fd_slot *s) {
     struct fd_frame_q *q = &s->q;
     int bad = 0;
     for (int i = 0; i < q->nbatch_fence && !bad; i++)
-        if (q->batch_fence[i] && vkWaitForFences(d->device, 1, &q->batch_fence[i], VK_TRUE, 5000000000ull) != VK_SUCCESS) bad = 1;
-    if (!bad && q->fence && vkWaitForFences(d->device, 1, &q->fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) bad = 1;
-    if (!bad && s->blit_fence && vkWaitForFences(d->device, 1, &s->blit_fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) bad = 1;
+        if (q->batch_fence[i] && fd_fence_wait(d, q->batch_fence[i], 5000000000ull) != VK_SUCCESS) bad = 1;
+    if (!bad && q->fence && fd_fence_wait(d, q->fence, 5000000000ull) != VK_SUCCESS) bad = 1;
+    if (!bad && s->blit_fence && fd_fence_wait(d, s->blit_fence, 5000000000ull) != VK_SUCCESS) bad = 1;
     if (!bad) {
         // 完成证明已在手：先把本帧每个提交批次的查询结果取走并回收页（页归属必须与 fence 同批），
         // 再释放提交资源。取不到就是准确失败（红），不写 0。
@@ -1659,6 +1682,339 @@ static void fd_pipe_slot_release(struct s2a_vk_device *d, struct fd_pipe_slot *s
     }
     if (s->obj && s->obj->users) s->obj->users--;
     memset(s, 0, sizeof *s);
+}
+
+/* ---------------- C4b：管线创建入后台（debug.s2a.pipe_async，默认 0 = 旧同步创建） ----------------
+   开关开：管线配方 miss 时把完整创建输入投进 nvn_vk_pipe_worker 后台线程，本笔绘制按
+   C4a 同一预算/判定表决定等还是跳；worker 产出的管线复核代际+配方后装入本缓存。
+   开关关：路径与旧版逐字节一致（同步 vkCreateGraphicsPipelines）。
+
+   与 debug.s2a.fu_wait 分开立开关的理由：fu_wait 测的是着色器现编等待链（compile_worker），
+   pipe_async 测的是管线对象创建链（pipe_worker）——两个成本中心、两套新机制，真机 A/B
+   归因要能单独开/关；判定点（能等多久）共用 C4a 的预算与 skip_safe，行为口径一致。
+
+   生命周期硬约束（违反就是 UAF）：
+   - job 引用 pobj->playout 与 render_pass，直到结果被 take/release。render_pass 只接受
+     全局 rp 缓存的（rp_queued==0，设备寿命）；open pass/帧队列 pass 不进 worker（帧末销毁）。
+   - pobj 在飞期间会被 LRU 淘汰（users==0 且非本帧）：pend 表项持有 users++ 保活到
+     结果取走或放弃，释放时归还给对象表。 */
+
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_start（宿主单测不链 pipe_worker.c 时整套
+   缺席 → fd_pipe_async_ensure 返回 0，路径与开关关闭同义。头文件是强声明，
+   按本文件 nvn_ga2ca 同款用 #pragma weak 覆盖本 TU 的引用强度。） */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_active */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_submit */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_take */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_wait */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_release */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_stop */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_cache_lock */
+/* 弱链接[androiddraw]：nvn_vk_pipe_worker_cache_unlock */
+#pragma weak nvn_vk_pipe_worker_start
+#pragma weak nvn_vk_pipe_worker_active
+#pragma weak nvn_vk_pipe_worker_submit
+#pragma weak nvn_vk_pipe_worker_take
+#pragma weak nvn_vk_pipe_worker_wait
+#pragma weak nvn_vk_pipe_worker_release
+#pragma weak nvn_vk_pipe_worker_stop
+#pragma weak nvn_vk_pipe_worker_cache_lock
+#pragma weak nvn_vk_pipe_worker_cache_unlock
+/* 弱链接[androiddraw]：nvk_fu_item_ms（draw.c 的 C4a 预算/判定件；缺实现时按 iOS 默认上限走） */
+/* 弱链接[androiddraw]：nvk_fu_frame_ms */
+/* 弱链接[androiddraw]：nvk_fu_unsafe_ms */
+/* 弱链接[androiddraw]：nvk_fu_skip_safe */
+/* 弱链接[androiddraw]：nvk_fu_budget_state */
+extern uint32_t nvk_fu_item_ms(void);
+extern uint32_t nvk_fu_frame_ms(void);
+extern uint32_t nvk_fu_unsafe_ms(void);
+extern int nvk_fu_skip_safe(const struct s2a_record_draw_state *, uint64_t);
+extern struct s2a_fu_budget *nvk_fu_budget_state(void);
+#pragma weak nvk_fu_item_ms
+#pragma weak nvk_fu_frame_ms
+#pragma weak nvk_fu_unsafe_ms
+#pragma weak nvk_fu_skip_safe
+#pragma weak nvk_fu_budget_state
+/* 弱链接[androiddraw]：s2a_fu_wait_decide（共用件缺席时判定环整体不开） */
+/* 弱链接[androiddraw]：s2a_fu_budget_left_ms */
+/* 弱链接[androiddraw]：s2a_fu_budget_spend */
+#pragma weak s2a_fu_wait_decide
+#pragma weak s2a_fu_budget_left_ms
+#pragma weak s2a_fu_budget_spend
+
+static int fd_pipe_async_on(void) {
+    static int v = -1;
+    if (v < 0) v = fd_prop_is_on("debug.s2a.pipe_async");
+    return v;
+}
+
+/* 在飞管线配方：late/stuck 终局标记 + pobj 保活 pin。判据用 nvk_pipe_recipe_match
+   （与 worker 去重、缓存命中同口径，request_id 不参与）。 */
+#define FD_PIPE_PEND 32
+static struct {
+    struct nvk_pipe_recipe recipe;
+    struct fd_prog_obj *pobj;
+    uint8_t used, late, stuck;
+    uint64_t seq;
+} g_pipe_pend[FD_PIPE_PEND];
+static uint64_t g_pipe_pend_seq;
+
+static int fd_pipe_pend_find(const struct nvk_pipe_recipe *r) {
+    for (int i = 0; i < FD_PIPE_PEND; i++)
+        if (g_pipe_pend[i].used && nvk_pipe_recipe_match(&g_pipe_pend[i].recipe, r)) return i;
+    return -1;
+}
+static void fd_pipe_pend_drop(int i) {
+    if (i < 0 || !g_pipe_pend[i].used) return;
+    if (g_pipe_pend[i].pobj && g_pipe_pend[i].pobj->users) g_pipe_pend[i].pobj->users--;
+    memset(&g_pipe_pend[i], 0, sizeof g_pipe_pend[i]);
+}
+/* 新登记：占用即对 pobj 计一次 users（布局对象的保活 pin）；满返回 -1（调用方回落同步）。 */
+static int fd_pipe_pend_add(const struct nvk_pipe_recipe *r, struct fd_prog_obj *pobj) {
+    int slot = -1;
+    uint64_t oldest = UINT64_MAX;
+    for (int i = 0; i < FD_PIPE_PEND; i++) {
+        if (!g_pipe_pend[i].used) { slot = i; break; }
+        if (g_pipe_pend[i].seq < oldest) { oldest = g_pipe_pend[i].seq; slot = i; }
+    }
+    if (slot < 0) return -1;
+    if (g_pipe_pend[slot].used) fd_pipe_pend_drop(slot);   // 挤掉最旧的：它的 worker 结果到无人认领会被 drain 丢弃
+    g_pipe_pend[slot].recipe = *r;
+    g_pipe_pend[slot].pobj = pobj;
+    g_pipe_pend[slot].late = g_pipe_pend[slot].stuck = 0;
+    g_pipe_pend[slot].seq = ++g_pipe_pend_seq;
+    g_pipe_pend[slot].used = 1;
+    if (pobj) pobj->users++;
+    return slot;
+}
+static void fd_pipe_pend_mark(int i, int timeout) {
+    if (i < 0 || !g_pipe_pend[i].used) return;
+    if (timeout == S2A_FU_T_LATE) g_pipe_pend[i].late = 1;
+    else if (timeout == S2A_FU_T_STUCK) g_pipe_pend[i].stuck = 1;
+    g_pipe_pend[i].seq = ++g_pipe_pend_seq;
+}
+
+/* 跳过/等待与 unsupported 分账：跳过是有意的、可恢复的，与 C4a 同一口径。 */
+static _Atomic uint64_t g_pfu_submit, g_pfu_ready_n, g_pfu_wait_n, g_pfu_wait_ns;
+static _Atomic uint64_t g_pfu_skip_budget, g_pfu_skip_late, g_pfu_skip_stuck, g_pfu_fallback;
+static _Atomic uint64_t g_pfu_drain_n, g_pfu_drain_drop;
+static void fd_pipe_fu_stats_log(void) {
+    static _Atomic uint64_t n;
+    uint64_t c = atomic_fetch_add(&n, 1) + 1;
+    if (c != 1 && c % 256) return;
+    FD_LOG("pipe first-use: submit=%llu ready=%llu waits=%llu wait=%.1fms "
+           "skip{budget=%llu late=%llu stuck=%llu} sync_fallback=%llu drain=%llu drain_drop=%llu",
+           (unsigned long long)atomic_load(&g_pfu_submit),
+           (unsigned long long)atomic_load(&g_pfu_ready_n),
+           (unsigned long long)atomic_load(&g_pfu_wait_n),
+           (double)atomic_load(&g_pfu_wait_ns) / 1e6,
+           (unsigned long long)atomic_load(&g_pfu_skip_budget),
+           (unsigned long long)atomic_load(&g_pfu_skip_late),
+           (unsigned long long)atomic_load(&g_pfu_skip_stuck),
+           (unsigned long long)atomic_load(&g_pfu_fallback),
+           (unsigned long long)atomic_load(&g_pfu_drain_n),
+           (unsigned long long)atomic_load(&g_pfu_drain_drop));
+}
+static void fd_pipe_fu_skip_count(int timeout) {
+    if (timeout == S2A_FU_T_BUDGET) atomic_fetch_add(&g_pfu_skip_budget, 1);
+    else if (timeout == S2A_FU_T_LATE) atomic_fetch_add(&g_pfu_skip_late, 1);
+    else if (timeout == S2A_FU_T_STUCK) atomic_fetch_add(&g_pfu_skip_stuck, 1);
+    fd_pipe_fu_stats_log();
+}
+static const char *fd_pipe_fu_class(int t) {
+    return t == S2A_FU_T_LATE ? "late" : t == S2A_FU_T_BUDGET ? "budget" :
+           t == S2A_FU_T_STUCK ? "stuck" : "?";
+}
+
+static int fd_pipe_async_ensure(struct s2a_vk_device *d, char *why, size_t why_size) {
+    if (!fd_pipe_async_on()) return 0;
+    if (!nvn_vk_pipe_worker_start || !nvn_vk_pipe_worker_active || !nvn_vk_pipe_worker_submit ||
+        !nvn_vk_pipe_worker_wait || !nvn_vk_pipe_worker_release || !nvn_vk_pipe_worker_take ||
+        !s2a_fu_wait_decide || !s2a_fu_budget_left_ms || !s2a_fu_budget_spend) return 0;
+    if (nvn_vk_pipe_worker_active()) return 1;
+    /* 代际 = 设备句柄（与 recipe.device 同源）：设备重建后 gen 自然换，worker 对旧代际
+       的结果一律不转交；start 幂等，旧线程未退出会如实拒绝（本笔回落同步）。 */
+    if (nvn_vk_pipe_worker_start(d->device, fd_pipeline_cache(d),
+                                 (uint64_t)(uintptr_t)d->device, why, why_size) != 0) {
+        static _Atomic int nf;
+        if (atomic_fetch_add(&nf, 1) < 4)
+            FD_LOG("pipe async: worker start failed (%s); this draw uses sync creation",
+                   why && why[0] ? why : "unknown");
+        return 0;
+    }
+    FD_LOG("pipe async: worker started (debug.s2a.pipe_async=1)");
+    return 1;
+}
+
+/* 装入管线缓存：与同步创建同一条插入路径（含 LRU 逐出与索引回填）。调用方持有
+   pipeline 所有权；装入后归缓存所有。pobj 必须由 pend pin 或调用方保活。 */
+static void fd_pipe_adopt(struct s2a_vk_device *d, const struct nvk_pipe_recipe *recipe,
+                          uint64_t pipe_key, VkPipeline pipeline, struct fd_prog_obj *pobj,
+                          const uint8_t program_input_sha[32]) {
+    if (program_input_sha) nvm_manifest_note(recipe, program_input_sha);
+    int slot = -1;
+    for (int i = 0; i < FD_PIPE_CACHE; i++) if (!g_pipe_cache[i].used) { slot = i; break; }
+    if (slot < 0) {
+        uint64_t oldest = ~0ull;
+        for (int i = 0; i < FD_PIPE_CACHE; i++)
+            if (g_pipe_cache[i].last_use < oldest) { oldest = g_pipe_cache[i].last_use; slot = i; }
+        fd_pipe_slot_release(d, &g_pipe_cache[slot]);   // 只释放本槽；共享对象不在这里销毁
+        atomic_fetch_add(&g_pipe_evicts, 1);
+    }
+    g_pipe_cache[slot].used = 1; g_pipe_cache[slot].key = pipe_key;
+    *fd_pipe_index_slot(pipe_key) = slot;
+    g_pipe_cache[slot].recipe = *recipe;
+    g_pipe_cache[slot].pipe = pipeline; g_pipe_cache[slot].obj = pobj;
+    pobj->users++;
+    g_pipe_cache[slot].last_use = ++g_pipe_clock;
+}
+
+/* 把 worker 已产出的结果取回装缓存。返回取到的条数。input_sha 只在本条配方属于
+   当前程序时传给 manifest_note（别的程序的结果不知道它的输入键，不硬配）。 */
+static int fd_pipe_drain(struct s2a_vk_device *d, const uint8_t prog_sha[32],
+                         const uint8_t program_input_sha[32]) {
+    if (!nvn_vk_pipe_worker_take || !nvn_vk_pipe_worker_release) return 0;
+    int got = 0;
+    struct nvk_pipe_job_result res;
+    while (nvn_vk_pipe_worker_take(&res) == 1) {
+        int pi = fd_pipe_pend_find(&res.recipe);
+        int usable = res.ok && res.pipeline &&
+                     res.device_generation == (uint64_t)(uintptr_t)d->device && pi >= 0;
+        uint64_t key = fd_pipe_key(&res.recipe);
+        if (usable) {
+            /* 同配方可能已被同步创建/先前 adopt 装上：命中则丢弃这份，不重复装。 */
+            int32_t s = *fd_pipe_index_slot(key);
+            int dup = 0;
+            if (s >= 0 && (unsigned)s < FD_PIPE_CACHE && g_pipe_cache[s].used &&
+                nvk_pipe_recipe_hit(g_pipe_cache[s].key, &g_pipe_cache[s].recipe, key, &res.recipe)) dup = 1;
+            if (!dup)
+                for (int i = 0; i < FD_PIPE_CACHE && !dup; i++)
+                    if (g_pipe_cache[i].used &&
+                        nvk_pipe_recipe_hit(g_pipe_cache[i].key, &g_pipe_cache[i].recipe, key, &res.recipe)) dup = 1;
+            if (dup) {
+                usable = 0;
+            } else {
+                const uint8_t *in_sha = (prog_sha && program_input_sha &&
+                                         !memcmp(res.recipe.prog_sha, prog_sha, 32)) ? program_input_sha : NULL;
+                fd_pipe_adopt(d, &res.recipe, key, res.pipeline, g_pipe_pend[pi].pobj, in_sha);
+                atomic_fetch_add(&g_pfu_drain_n, 1);
+            }
+        }
+        if (!usable) {
+            if (res.ok && res.pipeline) {
+                atomic_fetch_add(&g_pfu_drain_drop, 1);
+                static _Atomic int nf;
+                if (atomic_fetch_add(&nf, 1) < 8)
+                    FD_LOG("pipe async: drained pipeline dropped (stale/dup/no pend)");
+            }
+            nvn_vk_pipe_worker_release(&res);
+        }
+        if (pi >= 0) fd_pipe_pend_drop(pi);
+        got++;
+    }
+    if (got) fd_pipe_fu_stats_log();
+    return got;
+}
+
+/* 提交 + 等待环（C4a 判定表语义）。
+   返回 0 = 管线已装入缓存并写到 *out_pipe；2 = 按判定有意跳过本笔；
+   1 = 回落同步创建（队满/worker 未起/证据丢失/pend 表满）；
+   -1 = 真实失败（why 已写）。 */
+static int fd_pipe_async_get(struct s2a_vk_device *d, const struct s2a_record_draw_state *state,
+                             const struct nvk_pipe_job_spec *spec, struct fd_prog_obj *pobj,
+                             uint64_t pipe_key, const uint8_t program_input_sha[32],
+                             VkPipeline *out_pipe, char *why, size_t why_size) {
+    uint64_t job_id = 0;
+    int src = nvn_vk_pipe_worker_submit(spec, &job_id, why, why_size);
+    if (src == -2 || src == -3) {   // 队列满 / worker 未起：等价旧同步路径
+        atomic_fetch_add(&g_pfu_fallback, 1);
+        static _Atomic int nf;
+        if (atomic_fetch_add(&nf, 1) < 8)
+            FD_LOG("pipe async: %s, sync create", src == -2 ? "queue full" : "worker not running");
+        return 1;
+    }
+    if (src != 0 && src != 1) {   // -1 参数/容量；-4 代际不匹配：如实失败，不静默回落
+        if (!why[0]) fail(why, why_size, "pipeline worker submit failed");
+        return -1;   // why 已由 submit 写清
+    }
+    atomic_fetch_add(&g_pfu_submit, 1);
+    int pi = fd_pipe_pend_find(&spec->recipe);
+    if (pi < 0) pi = fd_pipe_pend_add(&spec->recipe, pobj);
+    if (pi < 0) {
+        /* 表满：job 仍在飞（结果到无人认领会被 drain 丢弃），本笔按旧路径同步建。 */
+        atomic_fetch_add(&g_pfu_fallback, 1);
+        return 1;
+    }
+    const uint64_t frame = nvn_vk_first_draw_frame_id();
+    const uint32_t item_ms = nvk_fu_item_ms ? nvk_fu_item_ms() : 2000;
+    const uint32_t frame_ms = nvk_fu_frame_ms ? nvk_fu_frame_ms() : 100;
+    const uint32_t unsafe_ms = nvk_fu_unsafe_ms ? nvk_fu_unsafe_ms() : 10000;
+    const int may_skip = (nvk_fu_skip_safe && state) ? nvk_fu_skip_safe(state, frame) : 0;
+    static struct s2a_fu_budget local_budget;
+    struct s2a_fu_budget *budget = nvk_fu_budget_state ? nvk_fu_budget_state() : &local_budget;
+    int late = g_pipe_pend[pi].late, stuck = g_pipe_pend[pi].stuck;
+    for (;;) {
+        struct nvk_pipe_job_result res;
+        int wrc = nvn_vk_pipe_worker_wait(&spec->recipe, spec->device_generation, 0, &res);
+        if (wrc == 1) {
+            if (!res.ok || !res.pipeline) {
+                snprintf(why, why_size, "pipeline worker: %s", res.why[0] ? res.why : "creation failed");
+                nvn_vk_pipe_worker_release(&res);
+                fd_pipe_pend_drop(pi);
+                return -1;
+            }
+            fd_pipe_adopt(d, &res.recipe, pipe_key, res.pipeline, pobj, program_input_sha);
+            *out_pipe = res.pipeline;
+            memset(&res, 0, sizeof res);   // 所有权已转交缓存
+            fd_pipe_pend_drop(pi);
+            atomic_fetch_add(&g_pfu_ready_n, 1);
+            return 0;
+        }
+        if (wrc == -1) {   // 证据丢失（挤出/stop）：回同步创建，不空等
+            fd_pipe_pend_drop(pi);
+            atomic_fetch_add(&g_pfu_fallback, 1);
+            return 1;
+        }
+        int64_t left = s2a_fu_budget_left_ms(budget, frame, frame_ms);
+        struct s2a_fu_verdict v = s2a_fu_wait_decide(0, late, stuck, may_skip,
+                                                   item_ms, frame_ms, left, unsafe_ms);
+        if (v.action == S2A_FU_SKIP) {
+            fd_pipe_pend_mark(pi, v.timeout);
+            fd_pipe_fu_skip_count(v.timeout);
+            snprintf(why, why_size, "pipeline first-use skipped (%s)", fd_pipe_fu_class(v.timeout));
+            return 2;
+        }
+        const uint32_t slice = v.wait_ms ? v.wait_ms : 250;
+        const uint64_t t0 = fd_now_ns();
+        wrc = nvn_vk_pipe_worker_wait(&spec->recipe, spec->device_generation, slice, &res);
+        const uint64_t waited = fd_now_ns() - t0;
+        if (may_skip) s2a_fu_budget_spend(budget, frame, waited);
+        atomic_fetch_add(&g_pfu_wait_n, 1);
+        atomic_fetch_add(&g_pfu_wait_ns, waited);
+        if (wrc == 1) {
+            if (!res.ok || !res.pipeline) {
+                snprintf(why, why_size, "pipeline worker: %s", res.why[0] ? res.why : "creation failed");
+                nvn_vk_pipe_worker_release(&res);
+                fd_pipe_pend_drop(pi);
+                return -1;
+            }
+            fd_pipe_adopt(d, &res.recipe, pipe_key, res.pipeline, pobj, program_input_sha);
+            *out_pipe = res.pipeline;
+            memset(&res, 0, sizeof res);
+            fd_pipe_pend_drop(pi);
+            atomic_fetch_add(&g_pfu_ready_n, 1);
+            return 0;
+        }
+        if (wrc == -1) {
+            fd_pipe_pend_drop(pi);
+            atomic_fetch_add(&g_pfu_fallback, 1);
+            return 1;
+        }
+        /* 本片超时：按判定表给的终局定性，打项标并跳过本笔。 */
+        fd_pipe_pend_mark(pi, v.timeout);
+        fd_pipe_fu_skip_count(v.timeout);
+        snprintf(why, why_size, "pipeline first-use skipped (%s)", fd_pipe_fu_class(v.timeout));
+        return 2;
+    }
 }
 
 // ---- 连续的同一附件绘制合并为一个 render pass / command buffer ----
@@ -2252,6 +2608,9 @@ static void fd_fb_cache_clear(VkDevice dev) {
 // 其余（barrier + fb + begin render pass）。不拆开就不知道 5.5 ms/帧 花在哪一步。
 static uint64_t g_rp_t_cget, g_rp_t_bcb, g_rp_t_rest, g_rp_t_npass;
 static _Atomic uint64_t g_rp_n_cget, g_rp_n_bcb;   // 实际 reset/begin 次数（批次复用后每次开 pass 不一定发生）
+// 逐帧 TSV 的不清零累计：记站点分别与 g_draws_since_report / g_rp_t_npass 对齐
+//   （窗口账读即清零，不能复用；逐帧差分由读方拿相邻两帧快照自己算）。
+static _Atomic uint64_t g_draws_total, g_passes_total;
 
 // 返回 pass；*queued=0 表示缓存所有（设备销毁时清），1 表示本次新建、调用方要交给帧队列销毁。
 // 失败返回 VK_NULL_HANDLE 并写 why。
@@ -2367,8 +2726,38 @@ static int fd_gpu_enabled(void) {
     }
     return g_gpu_on;
 }
+// 时间戳能力（hula 要求查 timestampValidBits / 队列族）：队列族 timestampValidBits>0、
+// timestampComputeAndGraphics 且 timestampPeriod>0 才启用；validBits 用于回读掩码（32 位设备会回卷）。
+static int g_gpu_ts_cap = -1;
+static uint32_t g_gpu_valid_bits;
+static int fd_gpu_ts_capable(struct s2a_vk_device *d) {
+    if (g_gpu_ts_cap >= 0) return g_gpu_ts_cap;
+    g_gpu_ts_cap = 0;
+    if (d && d->physical && d->device) {
+        uint32_t nf = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(d->physical, &nf, NULL);
+        if (nf && d->queue_family < nf) {
+            if (nf > 64) nf = 64;
+            VkQueueFamilyProperties fams[64];
+            vkGetPhysicalDeviceQueueFamilyProperties(d->physical, &nf, fams);
+            g_gpu_valid_bits = fams[d->queue_family].timestampValidBits;
+            if (g_gpu_valid_bits && d->properties.limits.timestampPeriod > 0.f &&
+                d->properties.limits.timestampComputeAndGraphics)
+                g_gpu_ts_cap = 1;
+        }
+    }
+    if (!g_gpu_ts_cap)
+        FD_LOG("gpu_time: timestamps unsupported (validBits=%u period=%f computeGfx=%d); 本设备关闭",
+               g_gpu_valid_bits, d ? (double)d->properties.limits.timestampPeriod : 0.0,
+               d ? (int)d->properties.limits.timestampComputeAndGraphics : 0);
+    return g_gpu_ts_cap;
+}
+static uint64_t fd_gpu_mask(void) {
+    return g_gpu_valid_bits >= 64 ? ~0ull : ((1ull << g_gpu_valid_bits) - 1ull);
+}
 static void fd_gpu_arm(struct s2a_vk_device *d, VkCommandBuffer cmd) {
     if (!fd_gpu_enabled() || g_gpu_armed || !d || !d->device || !cmd) return;
+    if (!fd_gpu_ts_capable(d)) return;
     int p = g_arena_parity & 1;
     if (!g_gpu_pool[p]) {
         VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
@@ -2441,7 +2830,7 @@ int nvn_vk_first_draw_gpu_read_frame(struct s2a_vk_device *d, int parity, const 
         return 0;
     }
     double period = d->properties.limits.timestampPeriod > 0 ? d->properties.limits.timestampPeriod : 1.0;
-    double ms = (double)(r[1] - r[0]) * period / 1e6;
+    double ms = (double)((r[1] - r[0]) & fd_gpu_mask()) * period / 1e6;   // 掩码回卷（validBits<64）
     g_gpu_last_ms = ms;
     g_gpu_last_passes = g_gpu_frame_passes[parity];
     g_gpu_last_valid = 1;
@@ -2493,6 +2882,10 @@ int nvn_vk_first_draw_gpu_last(double *ms, int *passes, uint64_t *frame) {
     return 1;
 }
 
+// 逐帧 TSV 的列出现判定：debug.s2a.gpu_time 开关（设备时间戳能力要 device、首帧 arm 才定，
+// 列只跟开关走；开着但不支持的设备 gpu_us 单元格全空，不写 0）。
+int nvn_vk_first_draw_gpu_on(void) { return fd_gpu_enabled(); }
+
 // present 的渲染 fence signal 之后调用：读 t0/t1 并打一行；失败/未就绪只记一次。
 void nvn_vk_first_draw_gpu_read(struct s2a_vk_device *d, const char *where) {
     int pp = g_gpu_arm_parity;
@@ -2503,8 +2896,8 @@ void nvn_vk_first_draw_gpu_read(struct s2a_vk_device *d, const char *where) {
     if (vr == VK_SUCCESS) {
         (void)nvn_vk_first_draw_gpu_read_frame(d, g_gpu_frame_parity >= 0 ? g_gpu_frame_parity : 0, NULL);
         double period = d->properties.limits.timestampPeriod > 0 ? d->properties.limits.timestampPeriod : 1.0;
-        FD_LOG("gpu frame: %.2f ms (%s, %d passes)", (double)(r[1] - r[0]) * period / 1e6,
-               where ? where : "?", g_gpu_npass[pp]);
+        double frame_ms = (double)((r[1] - r[0]) & fd_gpu_mask()) * period / 1e6;
+        FD_LOG("gpu frame: %.2f ms (%s, %d passes)", frame_ms, where ? where : "?", g_gpu_npass[pp]);
         // 逐 pass：读回整段，按耗时排前 6；只报 (size, 格式, draws)，不带 request 身份。
         uint64_t q[2 * FD_GPU_PASSES];
         if (vkGetQueryPoolResults(d->device, g_gpu_pool[pp], 0, (uint32_t)(2 * g_gpu_npass[pp]), sizeof q, q,
@@ -2512,13 +2905,13 @@ void nvn_vk_first_draw_gpu_read(struct s2a_vk_device *d, const char *where) {
             double dur[FD_GPU_PASSES];
             double busy = 0;
             for (int i = 1; i < g_gpu_npass[pp]; i++) {
-                dur[i] = (double)(q[2 * i + 1] - q[2 * i]) * period / 1e6;
+                dur[i] = (double)((q[2 * i + 1] - q[2 * i]) & fd_gpu_mask()) * period / 1e6;
                 busy += dur[i];
             }
             FD_LOG("gpu busy: %.2f ms of %.2f ms frame (%.0f%%); 逐 pass 之间的空闲=%s",
-                   busy, (double)(r[1] - r[0]) * period / 1e6,
-                   (double)(r[1] - r[0]) > 0 ? 100.0 * busy / ((double)(r[1] - r[0]) * period / 1e6) : 0.0,
-                   busy >= (double)(r[1] - r[0]) * period / 1e6 ? "0（含重叠）" : "见差值");
+                   busy, frame_ms,
+                   frame_ms > 0 ? 100.0 * busy / frame_ms : 0.0,
+                   busy >= frame_ms ? "0（含重叠）" : "见差值");
             for (int k = 0; k < 6; k++) {
                 int best = -1; double bv = 0;
                 for (int i = 1; i < g_gpu_npass[pp]; i++) if (dur[i] > bv) { bv = dur[i]; best = i; }
@@ -3081,6 +3474,7 @@ static int fd_pass_begin(struct s2a_vk_device *d, VkRenderPass pass, VkFramebuff
     int64_t tp3 = fd_now_ns();
     __atomic_fetch_add(&g_rp_t_rest, (uint64_t)(tp3 - tp2), __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_rp_t_npass, 1, __ATOMIC_RELAXED);
+    atomic_fetch_add_explicit(&g_passes_total, 1, memory_order_relaxed);
     // rest 细分：父项是 tp2..tp3，下面六段首尾相接、同属这批调用（分母一致）
     if (tr_gpuarm && tr_query && tr_precopy && tr_barrier && tp3) {   // 只在诊断开启时累加
         atomic_fetch_add(&g_rest_gpuarm_ns, (uint64_t)(tr_gpuarm - tp2));
@@ -3264,12 +3658,12 @@ static void fd_arena_complete(uint64_t seq) {
 // 预算压力下：对最早的在途批次做有界等待，完成就归还它的块。
 static int fd_arena_reclaim_oldest(struct s2a_vk_device *d) {
     if (g_fq.nbatch_fence > 0) {
-        VkResult r = vkWaitForFences(d->device, 1, &g_fq.batch_fence[0], VK_TRUE, 50000000ull);
+        VkResult r = fd_fence_wait(d, g_fq.batch_fence[0], 50000000ull);
         if (r == VK_SUCCESS) { fd_arena_complete(g_fq.batch_seq[0]); return 1; }
         return 0;
     }
     if (g_fq.fence) {
-        VkResult r = vkWaitForFences(d->device, 1, &g_fq.fence, VK_TRUE, 50000000ull);
+        VkResult r = fd_fence_wait(d, g_fq.fence, 50000000ull);
         if (r == VK_SUCCESS) { fd_arena_complete(g_fq.suffix_seq); return 1; }
     }
     return 0;
@@ -3621,7 +4015,7 @@ static int fd_fq_flush_impl(int64_t budget_ns, int terminal_timeout, int defer, 
             if (s2a_qret_slot(&g_fq.batch_qid[i], fd_query_retire_cb, NULL) != 0) return -1;
             continue;
         }
-        VkResult wr = vkWaitForFences(d->device, 1, &g_fq.batch_fence[i], VK_TRUE, (uint64_t)left);
+        VkResult wr = fd_fence_wait(d, g_fq.batch_fence[i], (uint64_t)left);
         if (wr == VK_TIMEOUT) { incomplete = 1; break; }
         if (wr != VK_SUCCESS) {
             FD_LOG("frame flush: batch fence %d/%d wait result=%d", i + 1, g_fq.nbatch_fence, (int)wr);
@@ -3646,7 +4040,7 @@ static int fd_fq_flush_impl(int64_t budget_ns, int terminal_timeout, int defer, 
                 return -1;
             }
         } else {
-            VkResult wr = vkWaitForFences(d->device, 1, &g_fq.fence, VK_TRUE, (uint64_t)left);
+            VkResult wr = fd_fence_wait(d, g_fq.fence, (uint64_t)left);
             if (wr == VK_TIMEOUT) incomplete = 1;
             else if (wr == VK_SUCCESS) {
                 fd_arena_complete(g_fq.suffix_seq);
@@ -3901,6 +4295,22 @@ int nvn_vk_first_draw_finish(void) {
 void nvn_vk_first_draw_release_device(struct s2a_vk_device *d) {
     // 只由 session 在设备空闲、保留账本结清且呈现退休之后调用。
     if (!d || !d->device) return;
+    /* C4b：先停管线 worker 再动设备对象——在飞 job 引用 pobj->playout 与全局 rp 缓存
+       的 render pass。stop 有界（最多等在途那一次 vkCreateGraphicsPipelines 出队）；
+       仍未退出就如实记一行：迟到结果由 worker 内销毁，pend 的 pin 全部归还。 */
+    if (nvn_vk_pipe_worker_stop) {
+        char why[160] = "";
+        int src = nvn_vk_pipe_worker_stop(2000, why, sizeof why);
+        if (src == 1) {
+            FD_LOG("pipe async: worker still creating at release (%s); second bounded stop",
+                   why[0] ? why : "timeout");
+            src = nvn_vk_pipe_worker_stop(4000, why, sizeof why);
+            if (src == 1)
+                FD_LOG("【红】pipe async: worker did not exit after second stop; in-flight create "
+                       "outlives device teardown");
+        }
+    }
+    for (int i = 0; i < FD_PIPE_PEND; i++) fd_pipe_pend_drop(i);
     for (int i = 0; i < g_fq.npend; i++)
         if (g_fq.pend[i]) vkDestroyPipeline(d->device, g_fq.pend[i], NULL);
     for (int i = 0; i < FD_PIPE_CACHE; i++) {
@@ -3957,6 +4367,8 @@ void nvn_vk_first_draw_release_device(struct s2a_vk_device *d) {
     }
     g_gpu_armed = 0;
     g_gpu_arm_parity = -1;
+    g_gpu_ts_cap = -1;               // 新设备重新评估时间戳能力/validBits
+    g_gpu_valid_bits = 0;
     // pass probe 的 host buffer 归当前设备；设备销毁前收回（没走完 flush 时也不会把映射带过设备边界）。
     if (g_fq.pp_buf) fd_pp_release(d);
     // 驱动管线缓存落盘：必须在设备销毁前取（release_device 的调用点满足），失败只记一行，
@@ -4211,7 +4623,7 @@ static int tr_image_raw(struct s2a_vk_device *d, struct fd_trace *t, const char 
     VkFence f; vkCreateFence(d->device, &fci, NULL, &f);
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
     int ok = vkQueueSubmit(d->queue, 1, &si, f) == VK_SUCCESS &&
-             vkWaitForFences(d->device, 1, &f, VK_TRUE, 5000000000ull) == VK_SUCCESS;
+             fd_fence_wait(d, f, 5000000000ull) == VK_SUCCESS;
     vkDestroyFence(d->device, f, NULL);
     vkFreeCommandBuffers(d->device, d->command_pool, 1, &cmd);
     if (!ok) { FD_LOG("trace: %s GPU readback failed", name); return -1; }
@@ -4581,6 +4993,12 @@ void nvn_vk_first_draw_take_counts(uint64_t *draws, uint64_t *depth_only) {
     if (depth_only) *depth_only = atomic_exchange(&g_depth_only_since_report, 0);
 }
 
+// 逐帧 TSV 用：窗口账读即清零不能复用，差分由读方自己算（声明点见文件前部）。
+void nvn_vk_first_draw_draw_pass_totals(uint64_t *draws, uint64_t *passes) {
+    if (draws) *draws = atomic_load(&g_draws_total);
+    if (passes) *passes = atomic_load(&g_passes_total);
+}
+
 // 观察窗口读数：render pass 缓存命中/新建，以及建 pass/framebuffer 的耗时。命中率和对象的
 // 创建耗时必须分开看，不能把“缓存命中多”当成“pass 成本已经降下来”。读取即清零。
 void nvn_vk_first_draw_pipe_create_stats(uint64_t *n, uint64_t *ns) {
@@ -4717,6 +5135,9 @@ static uint64_t g_preheat_frame = ~0ull;
 
 static void fd_preheat_one(struct s2a_vk_device *d) {
     if (!d || !d->device || !nvm_manifest_enabled() || nvm_manifest_count() == 0) return;
+    /* C4b：先把上一批投给 worker 的预热结果装回缓存（manifest 条目本就是账本记的，
+       不回写 manifest）；取回的管线让下面 take 的同配方条目在查重时直接命中。 */
+    if (fd_pipe_async_on()) fd_pipe_drain(d, NULL, NULL);
     const char *cdir = getenv("S2A_DIRECT_CACHE_DIR");
     if (!cdir || !cdir[0]) return;
     struct nvm_entry e;
@@ -4872,6 +5293,68 @@ static void fd_preheat_one(struct s2a_vk_device *d) {
         dss.back.compareOp = nvk_compare_op(dss_nvn.sf_b);
         dss.back.compareMask = 0xffu; dss.back.writeMask = 0xffu;
     }
+    /* C4b：预热投给 worker 后台建，不占提交线程（debug.s2a.pipe_async）。结果由下一个
+       tick / 下一笔 draw 开头的 fd_pipe_drain 取回装缓存；pobj 由 pend 表 pin 保活。 */
+    if (fd_pipe_async_ensure(d, why, sizeof why)) {
+        struct nvk_pipe_job_spec spec;
+        memset(&spec, 0, sizeof spec);
+        spec.device_generation = (uint64_t)(uintptr_t)d->device;
+        spec.device = d->device;
+        spec.cache = fd_pipeline_cache(d);
+        spec.layout = pobj->playout;
+        spec.render_pass = pass;
+        spec.subpass = 0;
+        spec.recipe = r;
+        spec.stage_count = 2;
+        spec.stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        spec.stages[0].spirv = (const uint32_t *)pobj->prog.stage[0].spirv;
+        spec.stages[0].bytes = pobj->prog.stage[0].spirv_bytes;
+        snprintf(spec.stages[0].entry, sizeof spec.stages[0].entry, "main");
+        spec.stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        spec.stages[1].spirv = (const uint32_t *)pobj->prog.stage[1].spirv;
+        spec.stages[1].bytes = pobj->prog.stage[1].spirv_bytes;
+        snprintf(spec.stages[1].entry, sizeof spec.stages[1].entry, "main");
+        spec.binding_count = vbind_count;
+        memcpy(spec.bindings, vbind, vbind_count * sizeof vbind[0]);
+        spec.attr_count = vattr_count;
+        memcpy(spec.attrs, vattr, vattr_count * sizeof vattr[0]);
+        spec.ia = ia;
+        spec.vp = vp;
+        spec.vp.pViewports = NULL; spec.vp.pScissors = NULL;
+        spec.viewport = viewport;
+        spec.scissor = scissor;
+        spec.rs = rs;
+        spec.ms = ms;
+        spec.cb = cb;
+        spec.blend_count = r.depth_only ? 0 : r.rt_color_count;
+        if (spec.blend_count) memcpy(spec.blend, cba, spec.blend_count * sizeof cba[0]);
+        spec.cb.pAttachments = NULL;
+        spec.ds = dss;
+        spec.has_depth = r.has_depth;
+        spec.dynamic_count = 2;
+        spec.dynamic[0] = VK_DYNAMIC_STATE_VIEWPORT;
+        spec.dynamic[1] = VK_DYNAMIC_STATE_SCISSOR;
+        int pi = fd_pipe_pend_find(&spec.recipe);
+        int added = 0;
+        if (pi < 0) { pi = fd_pipe_pend_add(&spec.recipe, pobj); added = pi >= 0; }
+        if (pi >= 0) {
+            uint64_t jid = 0;
+            int src = nvn_vk_pipe_worker_submit(&spec, &jid, why, sizeof why);
+            if (src == 0 || src == 1) {   // 受理或同配方已在途/待取：本条已处理完
+                atomic_fetch_add(&g_preheat_ns, (uint64_t)(fd_now_ns() - t0));
+                atomic_fetch_add(&g_preheat_n, 1);
+                atomic_fetch_add(&g_pfu_submit, 1);
+                return;
+            }
+            if (added) fd_pipe_pend_drop(pi);   // 只撤本次新加的 pin；旧 pend 归在途 job
+            if (src != -2 && src != -3) {   // -1 参数/-4 代际：如实跳过本条
+                atomic_fetch_add(&g_preheat_skip, 1);
+                return;
+            }
+            /* -2 队列满 / -3 worker 未起：落回下面的同步创建（与关开关同路径）。 */
+        }
+        /* pend 表满同样落回同步创建。 */
+    }
     VkPipelineShaderStageCreateInfo stages[2];
     memset(stages, 0, sizeof stages);
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -4886,7 +5369,13 @@ static void fd_preheat_one(struct s2a_vk_device *d) {
     gpi.pDynamicState = &dyn_state;
     gpi.layout = pobj->playout; gpi.renderPass = pass; gpi.subpass = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(d->device, fd_pipeline_cache(d), 1, &gpi, NULL, &pipeline) != VK_SUCCESS || !pipeline) {
+    const int pre_cache_lock = fd_pipe_async_on() &&
+        nvn_vk_pipe_worker_cache_lock && nvn_vk_pipe_worker_cache_unlock;
+    if (pre_cache_lock) nvn_vk_pipe_worker_cache_lock();
+    VkResult pre_rc = vkCreateGraphicsPipelines(d->device, fd_pipeline_cache(d), 1,
+                                                &gpi, NULL, &pipeline);
+    if (pre_cache_lock) nvn_vk_pipe_worker_cache_unlock();
+    if (pre_rc != VK_SUCCESS || !pipeline) {
         atomic_fetch_add(&g_preheat_skip, 1);
         return;
     }
@@ -5200,6 +5689,7 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
     // perf_timing 下的纹理槽比较、程序对象解析、帧队列腾位检查），原先没有归属。
     const int64_t t_tail_entry = fd_tail_stamp();
     atomic_fetch_add_explicit(&g_draws_since_report, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_draws_total, 1, memory_order_relaxed);
     if (atomic_fetch_add_explicit(&g_draws_this_frame, 1, memory_order_relaxed) == 0)
         g_frame_ref_seq = s2a_poolahb_begin_seq();   // 本帧所有保活记在这个单调序号下
     fd_samp_cache_ensure(d);
@@ -6137,6 +6627,9 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
             FD_LOG("trace: indices[0..%u] = %s", n, line);
         }
     }
+    /* C4b：先把 worker 已产出的管线装回缓存——刚完成的结果能把下面的 miss 直接
+       变成命中，也让被跳过的上一笔在结果就绪后无等待接上。 */
+    if (fd_pipe_async_on()) fd_pipe_drain(d, prog_sha, program_input_sha);
     uint64_t pipe_key = 0;
     struct nvk_pipe_recipe recipe;
     memset(&recipe, 0, sizeof recipe);
@@ -6182,6 +6675,64 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
             fail(why, why_size, "pipeline interface mismatch (recorded for this program; not retried)");
             goto done;
         }
+        /* C4b：异步创建（debug.s2a.pipe_async）。render_pass 必须活到 worker 产出被取走：
+           只有全局 rp 缓存的 pass（pass_owned==0 即 rp_queued==0，且未走 open-pass 复用）
+           满足；open pass/帧队列 pass 帧末销毁，不能进 worker——本笔直接回落同步。
+           pobj->playout 由 pend 表 pin 保活。 */
+        if (pass && !pass_owned && !pass_reuse && fd_pipe_async_ensure(d, why, why_size)) {
+            struct nvk_pipe_job_spec spec;
+            memset(&spec, 0, sizeof spec);
+            spec.device_generation = (uint64_t)(uintptr_t)d->device;
+            spec.device = d->device;
+            spec.cache = fd_pipeline_cache(d);
+            spec.layout = playout;
+            spec.render_pass = pass;
+            spec.subpass = 0;
+            spec.recipe = recipe;
+            spec.stage_count = 2;
+            spec.stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+            spec.stages[0].spirv = (const uint32_t *)prog.stage[0].spirv;
+            spec.stages[0].bytes = prog.stage[0].spirv_bytes;
+            snprintf(spec.stages[0].entry, sizeof spec.stages[0].entry, "main");
+            spec.stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            spec.stages[1].spirv = (const uint32_t *)prog.stage[1].spirv;
+            spec.stages[1].bytes = prog.stage[1].spirv_bytes;
+            snprintf(spec.stages[1].entry, sizeof spec.stages[1].entry, "main");
+            spec.binding_count = vbind_count;
+            memcpy(spec.bindings, vbind, vbind_count * sizeof vbind[0]);
+            spec.attr_count = vattr_count;
+            memcpy(spec.attrs, vattr, vattr_count * sizeof vattr[0]);
+            spec.ia = ia;
+            spec.vp = vp;
+            spec.vp.pViewports = NULL; spec.vp.pScissors = NULL;   // 指针内容搬进定长字段
+            spec.viewport = viewport;
+            spec.scissor = scissor;
+            spec.rs = rs;
+            spec.ms = ms;
+            spec.cb = cb;
+            spec.blend_count = depth_only ? 0 : mrt_plan.color_count;
+            if (spec.blend_count) memcpy(spec.blend, cba, spec.blend_count * sizeof cba[0]);
+            spec.cb.pAttachments = NULL;
+            spec.ds = dss;
+            spec.has_depth = depth_tex != NULL;
+            spec.dynamic_count = 2;
+            spec.dynamic[0] = VK_DYNAMIC_STATE_VIEWPORT;
+            spec.dynamic[1] = VK_DYNAMIC_STATE_SCISSOR;
+            int arc = fd_pipe_async_get(d, state, &spec, pobj, pipe_key,
+                                        program_input_sha, &pipeline, why, why_size);
+            if (arc == 0) {
+                pipe_from_cache = 1;   // worker 产出已装入缓存；模块/布局归程序对象表
+                atomic_fetch_add(&g_pipe_misses, 1);
+            } else if (arc == 2) {
+                rc = 2;   // 有意跳过：按 C4a 口径记 OK（调用方分支），不标 rt_drawn
+                goto done;
+            } else if (arc < 0) {
+                goto done;   // why 已由 fd_pipe_async_get 写清
+            }
+            /* arc == 1：回落下面的同步创建（队满/worker 未起/证据丢失/pend 表满）。 */
+        }
+    }
+    if (!pipe_from_cache) {
         VkPipelineShaderStageCreateInfo stages[2];
         memset(stages, 0, sizeof stages);
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -6197,7 +6748,15 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
         gpi.layout = playout; gpi.renderPass = pass; gpi.subpass = 0;
         FD_VLOG("creating graphics pipeline (%u vb, %u attr)", vbind_count, vattr_count);
         int64_t t_pipe0 = fd_now_ns();
-        if (vkCreateGraphicsPipelines(d->device, fd_pipeline_cache(d), 1, &gpi, NULL, &pipeline) != VK_SUCCESS) {
+        /* async 开时 worker 与这里的创建共用同一 VkPipelineCache：两边都要在
+           nvk_pipe_worker 的 g_cache_mu 下建（合同见 nvn_vk_pipe_worker.h）。 */
+        const int pipe_cache_lock = fd_pipe_async_on() &&
+            nvn_vk_pipe_worker_cache_lock && nvn_vk_pipe_worker_cache_unlock;
+        if (pipe_cache_lock) nvn_vk_pipe_worker_cache_lock();
+        VkResult pipe_rc = vkCreateGraphicsPipelines(d->device, fd_pipeline_cache(d), 1,
+                                                   &gpi, NULL, &pipeline);
+        if (pipe_cache_lock) nvn_vk_pipe_worker_cache_unlock();
+        if (pipe_rc != VK_SUCCESS) {
             // 驱动只说“Bind group info mismatches the shader source for symbol fp_c1”，不告诉我们是哪一项。
             // 这里把我们实际交给驱动的接口原样打出来（set/binding/kind/stage），才能定位是类型、数量还是缺项。
             FD_LOG("【红】管线创建失败：program=%02x%02x%02x%02x… bindings=%d（layout 原样如下）",
@@ -7287,7 +7846,7 @@ int nvn_vk_first_draw(struct s2a_vk_device *d, const struct s2a_record_draw_stat
             fail(why, why_size, "vkQueueSubmit failed for the draw");
             goto done;
         }
-        if (vkWaitForFences(d->device, 1, &fence, VK_TRUE, 5000000000ull) != VK_SUCCESS) {
+        if (fd_fence_wait(d, fence, 5000000000ull) != VK_SUCCESS) {
             // 提交成功但未拿到完成证明：命令缓冲和它引用的资源仍在 GPU 上，Vulkan 禁止此时释放。
             // 保留全部在途资源（有意泄漏），返回失败，让上层知道这笔没有完成证明。
             FD_LOG("fence timeout: draw resources retained (cmd=%p)", (void *)(uintptr_t)cmd);

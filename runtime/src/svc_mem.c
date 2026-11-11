@@ -2,6 +2,7 @@
 // vawin.c + layout.c 持有宿主地址窗口；Apple 可用远端影子，Android 暂沿用窗口内布局。
 // 4 KB 游戏页按 16 KB 分组记账；Android 映射原语使用实际宿主页，Apple 共享内存保留 16 KB 对齐。
 // 随包表：addr_need.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
+#include "s2a_init_fail.h"
 #include "native.h"
 #include "as_type.h"
 #include <errno.h>
@@ -352,6 +353,7 @@ static int alias_first_hint(const char *npdm, uint64_t pid) {
     int gb = alias > 63 ? 63 : (int)alias;   // 39 位别名区最多 64 GiB（addr_need.py ALIAS_MAX_GB）
     return unbounded ? -gb : gb;             // 负数 = 上限不定（layout.c 不收窗口）
 }
+__attribute__((weak)) void s2a_init_failed(int code) { (void)code; }   // 弱定义：宿主里 host_main.c 的强定义顶替（走初启失败出口、不返回）；只链本文件的单测用这份空的，返回后照旧 die
 // 布局只算一次：模块装载（loader.c 要模块段起点）早于 s2a_mem_init，两处都经这里。只看 NPDM 与宿主占到的窗口（layout.c）
 static int g_lay_ok; static uint64_t g_mod_base, g_shadow_base, g_lay_need;
 static void layout_prepare(const char *npdm) {
@@ -371,8 +373,12 @@ static void layout_prepare(const char *npdm) {
     int alias_gb = alias_first_hint(npdm, pid);
     int rc = s2a_layout_compute(t, sr, mod, alias_gb, wb, ws, &L, &g_mod_base, &g_shadow_base);
     if (rc == -1) die("【红】NPDM 地址空间类型 %u（%s）暂不支持（布局只支持类型 1 = 36 位、3 = 39 位）", t, s2a_as_type_bits(t));
-    if (rc == -2) die("【红】窗口 %#llx +%llu MB 连模块段（%llu MB）、栈、堆前段都放不下（SystemResourceSize %#llx，标准布局要 %llu MB）", (unsigned long long)wb, (unsigned long long)(ws >> 20),
-                      (unsigned long long)(mod >> 20), (unsigned long long)sr, (unsigned long long)(g_lay_need >> 20));
+    if (rc == -2) {   // #446：设备地址空间 / App 内存上限不够（iPad mini 6：2^39 以下只有 6 GB）。原先 die → abort，玩家只看到加载页后闪退；改走初启失败出口，iOS 停在提示页说清原因
+        LOG("【红】窗口 %#llx +%llu MB 连模块段（%llu MB）、栈、堆前段都放不下（SystemResourceSize %#llx，标准布局要 %llu MB）：这台设备的地址空间 / 内存不够跑这款", (unsigned long long)wb, (unsigned long long)(ws >> 20),
+            (unsigned long long)(mod >> 20), (unsigned long long)sr, (unsigned long long)(g_lay_need >> 20));
+        s2a_init_failed(S2A_INIT_FAIL_E_DEVICE_ADDRESS);   // 宿主里不返回
+        die("窗口放不下（没链宿主的失败出口）");
+    }
     if (L.win_size < g_lay_need && L.alias_base + L.alias_size <= L.win_base + L.win_size)   // 甲，或别名优先的乙放得下静态大区 + 余量（别名区收到窗口末，layout.c）
         LOG("地址按需：标准布局要 %llu MB，宿主占到 %llu MB——别名区 %llu MB 整段在窗口内（静态大区 %d GB），不伸出、不开远端",
             (unsigned long long)(g_lay_need >> 20), (unsigned long long)(L.win_size >> 20), (unsigned long long)(L.alias_size >> 20), alias_gb < 0 ? -alias_gb : alias_gb);

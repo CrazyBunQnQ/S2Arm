@@ -54,6 +54,17 @@ int main(void) {
     fresh(S2A_QL_FPS, 0); s2a_ql_top(2); CHECK(s2a_ql_tier() == 2, "三档款记下的主机60、上限掌机：拉到掌机30（实 %d）", s2a_ql_tier());
     CHECK(feed(600, 33.333, 1, 0.2, 0, 1, 0) < 0 && s2a_ql_tier() == 2, "三档款上限掌机：余量足 10 分钟不升");
     fresh(S2A_QL_FPS, 2); s2a_ql_top(0); r = feed(320, 33.333, 1, 0.2, 0, 1, 0); CHECK(r == 1, "上限主机（Mac / 玩家开了主机）：照旧升档（实 %d）", r);
+    // 梯子压 / 放 60 帧时要不要告诉玩家（审计 P1-80 原因 4）：期望按「起局不说、没变不说、没开 60 帧 / 自动化局不说、压了说 4、放开说 0」手推
+    { struct { int boot, last, hold, on, un, want; const char *why; } c[] = {
+        {1, -1, 1, 1, 0, -1, "起局按记下的档压回：不说（每次开游戏都弹是噪音）"},
+        {0, -1, 1, 1, 0, -1, "还没摆过档（last = -1）：不说"},
+        {0, 0, 1, 1, 0, 4, "局中从 60 帧压回原帧率：说原因 4"},
+        {0, 1, 0, 1, 0, 0, "局中放开回 60 帧：说已恢复"},
+        {0, 1, 1, 1, 0, -1, "压着没变：不说"},
+        {0, 0, 1, 0, 0, -1, "玩家没开 60 帧：不说"},
+        {0, 0, 1, 1, 1, -1, "自动化局：不说"} };
+      for (unsigned i = 0; i < sizeof c / sizeof *c; i++) { int got = s2a_ql_fps_note(c[i].boot, c[i].last, c[i].hold, c[i].on, c[i].un), ok = got == c[i].want;
+        bad += !ok; printf("%s 提示 %s：期望 %d → 实 %d\n", ok ? "✓" : "✗", c[i].why, c[i].want, got); } }
     printf("%s t_qladder：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }

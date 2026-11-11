@@ -102,6 +102,9 @@ static void metrics_contract(void) {
 int main(int argc,char **argv) {
     assert(argc==4);int scenario=atoi(argv[1]);mode=scenario;good=argv[2];bad=argv[3];
     setenv("S2A_SHADER_REVISION_ROOT","/revision",1);setenv("S2A_DIRECT_CACHE_DIR","/private",1);
+    /* 本用例验录制→提交→完成→回写链，!live 断言按「缓存对象留表」不成立写死——
+     * 缓存行为归 w2_compute_pipeline 验收；两门钉 0 防环境注入（pso 默认开、prog 默认关）。 */
+    setenv("S2A_COMPUTE_PSO_CACHE","0",1);setenv("S2A_COMPUTE_PROG_CACHE","0",1);
     const char *profile="{\"schema\":\"s2a-direct-profile-v1\",\"profileHash\":\"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"capabilities\":{\"storageBufferOffsetAlignment\":16}}";
     pc=(struct s2a_direct_compile_context){.session=11,.generation=22,.direct_abi=1,.translator_closure="closure",.profile_hash="sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.profile_json=profile,.profile_bytes=strlen(profile),.offline_profile_available=1};
     uint8_t ctl[0x760]={0},code[16]={1,2,3,4},key[32],graphics_key[8]={0xdd};

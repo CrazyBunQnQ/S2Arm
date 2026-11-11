@@ -12,7 +12,7 @@ trap 'rm -rf "$out"' EXIT
     -I "$repo/android/native/direct" -I "$repo/android/native/nvn" \
     -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" \
     -o "$out/t" "$repo/android/tests/nvn_vk_record_step_test.c" \
-    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/bind_defer.c" \
+    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/buffer_texture_plan.c" "$repo/android/native/direct/bind_defer.c" \
     "$repo/android/native/nvn/nvn_vk_query.c" \
     "$repo/android/native/nvn/nvn_vk_format.c" "$repo/android/native/direct/vk_clear.c" \
     "$repo/android/native/direct/vk_device.c" -lvulkan -llog -landroid -lm

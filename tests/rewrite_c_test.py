@@ -462,12 +462,47 @@ PER_CALL_S = 900
 
 def main():
     native = Path(os.environ['REW']).resolve()
+    corpus.REW = str(native)
     golden = Golden('rewrite_c'); problems = []
     elapsed = 0.0
     count = 0
     try:
         with tempfile.TemporaryDirectory(prefix='rewrite-c-') as tmp:
             temp = Path(tmp)
+            # Some NSOs have unwind coverage over almost all of __text but no
+            # per-function FDEs near the tail. A BL target must split that
+            # pathological covered range through the existing fallback bounds.
+            # Repeated LL/SC loads followed by a conditional branch expose the
+            # old find_windows full-function predecessor scan.
+            large_text = 32 * 1024 * 1024
+            code = [0xD503201F] * ((0x400 - 0x100) // 4)
+            code[0] = 0x94000040                  # bl 0x200
+            code[(0x200 - 0x100) // 4] = 0xD53BD072  # mrs x18, tpidrro_el0
+            code[(0x204 - 0x100) // 4] = 0x91000652  # add x18, x18, #1
+            code[(0x208 - 0x100) // 4] = 0x9400003E  # bl 0x300
+            code[(0x20C - 0x100) // 4] = 0xD65F03C0  # ret
+            code[(0x300 - 0x100) // 4] = 0xD65F03C0  # ret
+            # ldxr w8, [x0]; cbz w8, -4 (back to the ldxr), encoded directly
+            # so this regression fixture also runs on Windows without xcrun.
+            pair = [0x885F7C08, 0x34FFFFE8]
+            code.extend(pair * 500_000)
+            large_source = temp / 'large-covered-fde.nso'
+            corpus.nso(code, {}, large_text - 0x100, str(large_source), large_text)
+            # Correct the fixture's FDE initial-location pointer to a valid
+            # pcrel __text address so the test exercises covered-function
+            # boundaries rather than the uncovered-code fallback.
+            image = bytearray(large_source.read_bytes())
+            fde_pc_file_offset = 0x100 + large_text + 0x220
+            struct.pack_into('<i', image, fde_pc_file_offset, 0x100 - (large_text + 0x220))
+            large_source.write_bytes(image)
+            large_out = temp / 'large-covered-fde-out'
+            started = time.monotonic()
+            rc, gaps, stat, log = corpus.rewrite(str(large_source), str(large_out), 'apple')
+            large_elapsed = time.monotonic() - started
+            if (rc or gaps or stat.get('tpidrro_r') != 1 or
+                    not (large_out / 'main.patched.bin').is_file() or large_elapsed >= 20):
+                raise AssertionError(f'large covered FDE fallback: rc={rc} gaps={gaps} stat={stat} elapsed={large_elapsed:.2f}s\n{log}')
+            print(f'大范围 FDE 调用目标边界回退：32 MiB → rc=0、零缺口、{stat}，{large_elapsed:.3f}s')
             for case in corpus.CASES + EXTRA_CASES:
                 if len(sys.argv) > 1 and not any(case["name"].startswith(p) for p in sys.argv[1:]):
                     continue

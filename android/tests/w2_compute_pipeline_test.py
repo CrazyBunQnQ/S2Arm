@@ -57,6 +57,12 @@ class ComputePipeline(unittest.TestCase):
               'negative_tex_wrong_view':source.replace('ii[i].imageView = tb->view;', 'ii[i].imageView = (VkImageView)0xdead;'),
               'negative_tex_wrong_sampler':source.replace('ii[i].sampler = tb->sampler;', 'ii[i].sampler = (VkSampler)0x33;'),
               'negative_tex_no_general':source.replace('ii[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;', 'ii[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;'),
+              # PSO 缓存负对照：永不命中（= 修前行为）→ 门开断言 pipe_calls==1 变红
+              'negative_pso_never_hit':source.replace('        if (hit) {', '        if (0) {'),
+              # 程序级缓存负对照：identity 比对失效 → 异 identity 互配 → 键绑定断言红；
+              # 永不入表 → prog_lookup 恒 NULL → 命中断言红
+              'negative_prog_any_identity':source.replace('!e->by_identity || memcmp(e->identity, identity, 32)', 'memcmp(identity, identity, 32)'),
+              'negative_prog_never_insert':source.replace('    } else if (prog && identity && o->pipeline) {', '    } else if (0 && prog && identity && o->pipeline) {'),
               'drop-c1-binding':source.replace('} else if (r->kind == 0 && r->slot == 1) {', '} else if (0) {'),
               'c1-from-guest-read':source.replace('memcpy(b->mapped, source->c1, NVK_COMPUTE_C1_BYTES);', 'memcpy(b->mapped, b->mapped, 0);')}
             for name,code in variants.items():
@@ -64,7 +70,7 @@ class ComputePipeline(unittest.TestCase):
                 (out/'nvn').mkdir(exist_ok=True)
                 (out/'nvn/nvn_vk_compute.c').write_text(code)
                 exe=out/name
-                cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror']
+                cmd=[os.environ.get('CC','cc'),'-std=c11','-D_POSIX_C_SOURCE=200809L','-Wall','-Wextra','-Werror']
                 cmd+=['-I'+str(p) for p in (out,native,native/'nvn',native/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
                 cmd += [str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(native/'nvn/nvn_vk_compute_texture.c'),str(native/'direct/texture_facts.c'),'-o',str(exe)]
                 host_link.run(cmd,check=True)
@@ -76,7 +82,7 @@ class ComputePipeline(unittest.TestCase):
             # s2a_vk_adapter_pool_find（weak 为 NULL），生产必须准确拒 "pool lookup is unavailable"。
             (out/'nvn/nvn_vk_compute.c').write_text(source)
             exe2=out/'positive_no_pool_seam'
-            cmd2=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function']
+            cmd2=[os.environ.get('CC','cc'),'-std=c11','-D_POSIX_C_SOURCE=200809L','-Wall','-Wextra','-Werror','-Wno-unused-function']
             cmd2+=['-I'+str(q) for q in (out,native,native/'nvn',native/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
             cmd2+=['-DS2A_TEST_NO_POOL_FIND',str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(native/'nvn/nvn_vk_compute_texture.c'),str(native/'direct/texture_facts.c'),'-o',str(exe2)]
             host_link.run(cmd2,check=True)

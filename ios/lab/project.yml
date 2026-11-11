@@ -12,12 +12,14 @@ targets:
       - ios/vpad_layout.m
       - ios/vpad_settings.m
       - ios/vpad_cheats.m
+      - ios/cheats_parse.m
       - ios/app_settings.m
       - ios/cpatch_settings.m
       - ios/cpatch_model.m
       - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
       - ios/settings.m
       - ios/controller.m
+      - ios/ea_rumble.m
       - ios/phone_motion.m
       - ios/diag.m
       - ios/diagzip.m
@@ -34,6 +36,7 @@ targets:
       - sdk: GameController.framework
       - sdk: CoreMotion.framework
       - sdk: CoreHaptics.framework
+      - sdk: ExternalAccessory.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: MetricKit.framework
       - sdk: Metal.framework

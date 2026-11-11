@@ -12,11 +12,21 @@ endif()
 
 function(s2a_android_host_sources output)
     set(sources
-        native/s2a_savecommit.c native/capacity_affinity.cpp native/adpf_hint.c
+        native/s2a_savecommit.c native/system_tuning.c native/capacity_affinity.cpp native/adpf_hint.c
         native/bridge.cpp native/lan_discovery.cpp ../runtime/src/lan_elect.c native/capture_jpeg.cpp native/touch_jni.cpp native/game_touch.c native/window.cpp native/presenter.cpp
         native/wsi_lease.c native/input.c native/tsd.c native/module.c native/selftest.c native/selftest_gate.S
         native/guest_signal.c native/redlog.c native/redzone.S native/pcm_ring.c native/aaudio_sink.c native/hostapi.c native/screen_metrics.c
+        # #48 P8：dm_thermal_now / dm_low_power_now 的安卓强定义（盖过 fps.c / hle_nvn.c 的弱缺省）
+        native/power_state.c
         native/host_android.c native/host_ui.c native/host_ui_android.c native/host_ui_jni.cpp native/plat_android.c
+        # 直连安全网安卓接线（共用 runtime/src/dguard.c 的武装 / 生命周期出口；游戏目标由
+        # Runtime.cmake 提供 dguard.c，诊断目标见 s2a_android_diagnostic_sources）
+        native/dguard_android.c
+        # 安卓侧共用文档根绑定：runtime.c 起局把 S2A_DOCS 指到本局 state 目录（iOS/Mac 由
+        # launchctx 提供，安卓无此环节；dguard 的 wire/direct_guard 等消费者才得以落盘）
+        native/docs_android.c
+        # AMediaCodec 视频解码边界（#44 第二刀）：纯 NDK API，无钉版源码，直接进单库。
+        codecs/s2a_mc.c
         native/direct_vk.c native/direct_session.c native/direct_choice.c native/direct_callback.c native/direct_callback.S)
     if(S2A_ANDROID_EXPERIMENTAL_TOUCH)
         list(APPEND sources native/touch_input.c)
@@ -38,7 +48,14 @@ function(s2a_android_diagnostic_sources output)
         native/runtime/tracking/registry.c
         # #1456 capprobe：诊断单库同样链 bridge.cpp / vk_device.c 引用的探测符号；
         # 探测本体 capprobe.c 只编成独立可执行件（packaged helper），不进单库。
-        native/capprobe/capprobe_host.c)
+        native/capprobe/capprobe_host.c
+        # dguard_android.c / bridge.cpp 引用的共用出口：诊断目标编入同一实现（无武装点，
+        # 只靠弱回退的日志与 stub 的 s2a_host_session_state 空转），行为与游戏目标一致。
+        ../runtime/src/dguard.c ../runtime/src/direct_prompt.c
+        # 诊断目标没有原生会话核心：direct_prompt.c 要的 s2a_host_session_state 等会话入口由 stub 给
+        # （恒报 FAILED）。不论服务层是否静态链入都要它，否则缺省 assembleDebug（S2A_CS_SERVICES=0）
+        # 在 -z defs 下报 undefined symbol: s2a_host_session_state。
+        native/s2a_native_stub.c)
     set(${output} "${sources}" PARENT_SCOPE)
 endfunction()
 
@@ -47,7 +64,8 @@ function(s2a_android_static_sources output mode)
     # provider 提供同一组符号。只读 guest 复制只在诊断目标需要。
     if(mode STREQUAL "diagnostic")
         # readonly_copy.c 现在也读背板打洞世代号（#1217 §2.6），诊断单库必须带 backing.c。
-        set(sources native/s2a_native_stub.c native/runtime/tracking/readonly_copy.c native/runtime/vm/backing.c)
+        # 链接桩 s2a_native_stub.c 已在 s2a_android_diagnostic_sources 里（不论服务层模式）。
+        set(sources native/runtime/tracking/readonly_copy.c native/runtime/vm/backing.c)
     else()
         set(sources)
     endif()
@@ -69,14 +87,21 @@ function(s2a_android_direct_sources output)
         # 逐帧上屏间隔 + 每帧 fence 等待（诊断默认关）：direct/generic 同一份环形缓冲与
         # 转储格式（t-direct-frametimes），generic 经 DllImport 调 s2a_frame_log_present/dump，必须随直连核心编入。
         native/nvn/nvn_vk_frame_log.c
+        # 逐帧 TSV（iOS frames.tsv 同义；诊断默认关）：present 成功点取各累计源差分写行，
+        # 拿不到的列整列不进表头。
+        native/nvn/nvn_vk_frame_tsv.c
         native/nvn/nvn_vk_compile_events.c
         native/direct/vk_clear.c
         native/nvn/nvn_vk_swapchain.c native/nvn/nvn_vk_surface.c native/nvn/nvn_vk_session.c
+        # 显示节拍源：AChoreographer（nvn_vsync.h 契约 + nvn_be_link_* 助手，debug.s2a.vsync 门）
+        native/nvn/nvn_vsync_android.c
+        # B2：VK_GOOGLE_display_timing 上屏时刻计量（presentID 挂链 + 回读 + 帧号映射），直连专用。
+        native/nvn/nvn_vk_display_timing.c
         native/nvn/nvn_vk_lifecycle.c native/nvn/nvn_vk_pipeline.c native/nvn/nvn_vk_texcache.c
         native/nvn/nvn_vk_bcdec.c
         # NVN ReadTexels：纯几何换算（宿主单测同源）+ guest 内存路径 + GPU 图像路径。
         native/nvn/nvn_vk_readback_plan.c native/nvn/nvn_vk_readback.c native/nvn/nvn_vk_readback_gpu.c
-        native/nvn/mtl_vk_adapter.c native/direct/vk_record.c native/direct/t2t_plan.c
+        native/nvn/mtl_vk_adapter.c native/direct/vk_record.c native/direct/t2t_plan.c native/direct/buffer_texture_plan.c
         # 批次 1/A：命令流拍平（A2 延迟参数入记录 + A4 记录内引用重定位）；shim 的 clone_append 调用它。
         native/direct/record_flat.c
         native/nvn/nvn_vk_sampler_cache.c native/nvn/nvn_vk_sampler.c native/nvn/nvn_vk_format.c
@@ -98,6 +123,8 @@ function(s2a_android_direct_sources output)
         native/direct/program_cache.c native/direct/offline_library.c
         # Pure texture helpers are needed by the core even without the game frontend.
         ../graphics/nvn/gfx/nvn/nvn_tex.c ../graphics/nvn/gfx/tex/nvn_deswizzle.c
+        # C4a 首用等待语义（iOS pso_pend 对齐）：rt 历史 + 帧预算 + 判定表，纯 C 无锁。
+        ../graphics/nvn/gfx/nvn/nvn_first_use.c
         # 纹理缓存（nvn_vk_texcache.c）按页级写跟踪判脏，前端关也引用：nvn_dirty 与它的
         # Android 宿主钩子（dm_* → direct_host）随直连核心编入，不再只挂在前端源列表里。
         ../graphics/nvn/gfx/nvn/nvn_dirty.c native/nvn/nvn_host_hooks.c)

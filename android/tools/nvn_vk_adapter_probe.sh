@@ -14,7 +14,7 @@ trap 'rm -rf "$out"' EXIT
     -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" -I "$repo/graphics/nvn/gfx/tex" \
     -o "$out/t" "$repo/android/tests/nvn_vk_adapter_test.c" \
     "$repo/android/native/nvn/mtl_vk_adapter.c" \
-    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/bind_defer.c" \
+    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/buffer_texture_plan.c" "$repo/android/native/direct/bind_defer.c" \
     "$repo/android/native/nvn/nvn_vk_query.c" \
     "$repo/android/native/nvn/nvn_vk_session.c" \
     "$repo/android/native/nvn/nvn_vk_lifecycle.c" \

@@ -387,7 +387,7 @@ class AndroidDeliveryTest(unittest.TestCase):
              patch.object(mod.platform, 'system', return_value='Darwin'), \
              patch.object(mod.platform, 'machine', return_value='arm64'), \
              patch.dict(os.environ, {'PATH':'/nonexistent', 'ANDROID_HOME':str(sdk)}, clear=True), \
-             patch.object(mod.subprocess, 'run', side_effect=run):
+             patch.object(mod, 'java_runtime_ok', return_value=True), patch.object(mod.subprocess, 'run', side_effect=run):
             result = mod.package(product, self.base / 'out')
         self.assertTrue(Path(result['artifact']).is_file())
         self.assertEqual(next(env['S2A_REWRITE_SPIN'] for args, env in zip(calls, envs) if len(args) > 1 and args[1].endswith('make_pack.py')), '0')
@@ -639,6 +639,21 @@ class AndroidDeliveryTest(unittest.TestCase):
         with patch.object(mod, 'java_runtime_ok', return_value=True), patch.object(mod.subprocess, 'run') as run:
             mod.verify_signature(self.base, self.apk, env, 'docker')
             self.assertEqual(run.call_args.args[0], [str(signer), 'verify', str(self.apk)])
+        # host 后端、PATH 上没有能用的 Java（JDK 17 只装在 Homebrew）：验签用 tools/jdk17.sh 找到的那个 JDK
+        jdk = self.base / 'jdk17'; (jdk / 'bin').mkdir(parents=True)
+        seen = {}
+        def run_finder(cmd, env=None, **kw):
+            if cmd == ['bash', str(self.base / 'android/tools/jdk17.sh')]:
+                return subprocess.CompletedProcess(cmd, 0, stdout=f'{jdk}/bin/javac\n')
+            seen.update(cmd=cmd, env=env); return subprocess.CompletedProcess(cmd, 0)
+        with patch.object(mod, 'java_runtime_ok', return_value=False), patch.object(mod.subprocess, 'run', side_effect=run_finder):
+            mod.verify_signature(self.base, self.apk, env, 'host')
+        self.assertEqual(seen['cmd'], [str(signer), 'verify', str(self.apk)])
+        self.assertEqual(seen['env']['JAVA_HOME'], str(jdk))
+        self.assertEqual(seen['env']['PATH'].split(os.pathsep)[0], str(jdk / 'bin'))
+        with patch.object(mod, 'java_runtime_ok', return_value=True), patch.object(mod.subprocess, 'run', side_effect=run_finder):
+            mod.verify_signature(self.base, self.apk, env, 'host')
+        self.assertEqual(seen['env'], env)  # 本来就有能用的 Java：环境原样
         signer.unlink()
         with self.assertRaisesRegex(ValueError, 'apksigner'):
             mod.verify_signature(self.base, self.apk, env, 'host')

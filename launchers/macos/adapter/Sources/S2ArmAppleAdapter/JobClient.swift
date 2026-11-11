@@ -214,7 +214,18 @@ public final class JobClient {
 
     /// 跑 updater.py 的一条命令，逐行交 JSON；结束时返回最后一行。
     private func runUpdater(_ command: [String], onEvent: @escaping @Sendable ([String: Any]) -> Void = { _ in }) async -> [String: Any]? {
-        guard let python = try? pythonExecutable(), let entry = try? updaterEntry() else { return nil }
+        await runJobsScript("updater.py", command, onEvent: onEvent)
+    }
+
+    /// 批量出包的批次（pack/jobs/batch.py，Mac / Windows 共用）：show / create / mark / recover / cancel / resume / retry / clear，
+    ///   返回 {batch, next, summary}（没有批次 → 空字典）；起不来返回 nil
+    public func batch(_ command: String, _ arguments: [String] = []) async -> [String: Any]? {
+        await runJobsScript("batch.py", [command, "--private-root", environment.privateRoot.path] + arguments)
+    }
+
+    /// 跑 pack/jobs 下的一个小脚本（updater.py / batch.py），逐行交 JSON；结束时返回最后一行
+    private func runJobsScript(_ script: String, _ command: [String], onEvent: @escaping @Sendable ([String: Any]) -> Void = { _ in }) async -> [String: Any]? {
+        guard let python = try? pythonExecutable(), let entry = try? jobEntry().deletingLastPathComponent().appendingPathComponent(script) else { return nil }
         final class Last: @unchecked Sendable { let lock = NSLock(); var value: [String: Any]? }
         let last = Last()
         return await withCheckedContinuation { continuation in

@@ -6,7 +6,7 @@ namespace S2A.Services
 {
     // 系统语言缺省跟设备（维护者 10-20：「都要装上以后默认是中文版哈（系统本身也是中文版的）」）：
     //   没给 S2A_SYSTEM_LANGUAGE 时按 iPhone / Mac 的系统首选语言（CFLocaleCopyPreferredLanguages，BCP 47 标签如 zh-Hans-CN）映射 Switch SystemLanguage；
-    //   测试资产 / 对真值局显式给的 S2A_SYSTEM_LANGUAGE 照旧优先。游戏不支持该语言时 Ryujinx GetDesiredLanguage 退到游戏支持的第一种。
+    //   测试资产 / 对真值局显式给的 S2A_SYSTEM_LANGUAGE 照旧优先。游戏不支持该语言时按 TitleFallback 的四步选。
     //   服务层是 InvariantGlobalization，CultureInfo 拿不到系统语言，所以直接调 CoreFoundation（iOS / macOS 同一个 C 接口）
     public static class SystemLocale
     {
@@ -63,19 +63,40 @@ namespace S2A.Services
             return SystemLanguage.AmericanEnglish;
         }
 
-        // 游戏不支持系统语言时依次试的语言（交 Ryujinx GetDesiredLanguage，S2AHooks.TitleLanguageFallback）：系统首选语言列表依次 → 简中 → 繁中 → 美式 / 英式英语；
-        //   都不支持才轮到游戏自己的首选（11-03 归族：GB4 / FFR / JUMP FORCE 亚洲版只收韩 / 繁 / 简，上游取「游戏支持的第一个」= 韩语，玩家看到韩文界面）
-        public static TitleLanguage[] TitleFallback(string[] tags)
+        // 游戏不支持系统语言时依次试的语言（交 Ryujinx GetDesiredLanguage，S2AHooks.TitleLanguageFallback）。只看宿主主语言 primary
+        //   （Host.Language：玩家显式指定的语言优先，否则宿主首选列表第一项；维护者 11-10「导出终端根据咱们宿主来识别语言种类」），不逐个走首选列表：
+        //   ① 主语言 → ② 它的同族变体（简中 ↔ 繁中、美式 ↔ 英式英语、法语 ↔ 加拿大法语、西班牙语 ↔ 拉美西语、葡语 ↔ 巴西葡语）→ ③ 美式 / 英式英语 → ④ 简中 / 繁中 → ⑤ 游戏支持表第一项（上游）。
+        //   ④ 留住 11-03 的修法（亚洲版只收韩 / 繁 / 简，上游取第一个 = 韩语）：玩家绝大多数是中文用户，宿主英语也多半是中文玩家设的英文系统，简 / 繁比韩语更可能看得懂。
+        //   同族紧跟是真机 ns 服务语言优先表的口径（逆向资料：简中表 = 简中、繁中、美式英语、英式英语、日语…）。
+        //   #445：游戏只声明美 / 日 / 韩 / 繁（0x3005），旧拼法「首选列表逐个 → 简中 → 繁中」让首选列表后面的日语 / 英语先于繁中命中，中文玩家看到日文 / 英文
+        public static TitleLanguage[] TitleFallback(SystemLanguage primary)
         {
             var r = new System.Collections.Generic.List<TitleLanguage>();
             void Add(TitleLanguage t) { if (!r.Contains(t)) r.Add(t); }
-            foreach (string tag in tags)
+            if (Enum.TryParse(primary.ToString(), out TitleLanguage p))
             {
-                if (Map(tag) is SystemLanguage l && Enum.TryParse(l.ToString(), out TitleLanguage t)) Add(t);
+                Add(p);
+                if (Sibling(p) is TitleLanguage s) Add(s);
             }
-            Add(TitleLanguage.SimplifiedChinese); Add(TitleLanguage.TraditionalChinese); Add(TitleLanguage.AmericanEnglish); Add(TitleLanguage.BritishEnglish);
+            Add(TitleLanguage.AmericanEnglish); Add(TitleLanguage.BritishEnglish);
+            Add(TitleLanguage.SimplifiedChinese); Add(TitleLanguage.TraditionalChinese);
             return r.ToArray();
         }
+
+        public static TitleLanguage? Sibling(TitleLanguage t) => t switch
+        {
+            TitleLanguage.SimplifiedChinese => TitleLanguage.TraditionalChinese,
+            TitleLanguage.TraditionalChinese => TitleLanguage.SimplifiedChinese,
+            TitleLanguage.AmericanEnglish => TitleLanguage.BritishEnglish,
+            TitleLanguage.BritishEnglish => TitleLanguage.AmericanEnglish,
+            TitleLanguage.French => TitleLanguage.CanadianFrench,
+            TitleLanguage.CanadianFrench => TitleLanguage.French,
+            TitleLanguage.Spanish => TitleLanguage.LatinAmericanSpanish,
+            TitleLanguage.LatinAmericanSpanish => TitleLanguage.Spanish,
+            TitleLanguage.Portuguese => TitleLanguage.BrazilianPortuguese,
+            TitleLanguage.BrazilianPortuguese => TitleLanguage.Portuguese,
+            _ => null,
+        };
 
         public static string[] Preferred()
         {

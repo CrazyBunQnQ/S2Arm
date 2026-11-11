@@ -16,6 +16,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
             RunPass<SharedAtomicSignedCas>(context);
             RunPass<ShufflePass>(context);
             RunPass<TensorPass>(context);
+            S2APositionPrecise.Run(context);   // S2A：降精度下位置链仍精确（#82），须在把输出改写成缓冲写入的 VertexToCompute / GeometryToCompute 之前
             RunPass<VertexToCompute>(context);
             RunPass<GeometryToCompute>(context);
         }

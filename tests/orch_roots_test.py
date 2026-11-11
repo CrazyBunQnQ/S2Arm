@@ -327,5 +327,49 @@ class RootsTest(unittest.TestCase):
                 p.terminate(); p.communicate(timeout=10)
 
 
+class ShortRootLinkTest(unittest.TestCase):
+    # #461：Windows 上目录链接一律写绝对的玩家路径（短根换回长路径）；读链接自己拼，老的相对链接经短根联接也读得出。期望手写：
+    #   ① nt（模拟）：给了 relative、目标在短根下 → os.symlink 收到的是长路径下的绝对目标，不是相对、不是短路径
+    #   ② 原生 Windows：经短根联接访问时，老的相对软链 link_target 解析到真实目录；directory_link 新建的链接内容 = 长路径绝对目标，经联接 stat / listdir 正常
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='s2a-461-'); self.home = Path(self.temp.name)
+
+    def tearDown(self): self.temp.cleanup()
+
+    def test_nt_writes_absolute_long_target(self):
+        fake = _Os('nt'); fake.symlink = Mock()
+        long, short = self.home / 'long', self.home / 'j' / 'ab12'
+        with patch.object(roots, 'os', fake), patch.object(roots, 'table_now', return_value=__import__('pack.orch.winlong', fromlist=['parse_table']).parse_table(f'{long}\t{short}')):
+            roots.directory_link(short / 'roots' / 'g@v1', short / 'roots' / 'g@现行', relative='g@v1')
+        value = fake.symlink.call_args.args[0]
+        self.assertEqual(value, os.path.normpath(str(long / 'roots' / 'g@v1')))
+        self.assertTrue(fake.symlink.call_args.kwargs.get('target_is_directory'))
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows short-root junction')
+    def test_native_relative_old_link_and_new_absolute_link(self):
+        import _winapi
+        long, short = self.home / 'long', self.home / 'j' / 'ab12'
+        (long / 'roots' / 'v1').mkdir(parents=True); (long / 'roots' / 'v1' / 'f').write_bytes(b'x'); short.parent.mkdir()
+        _winapi.CreateJunction(str(long), str(short))
+        try:
+            try:
+                os.symlink('v1', long / 'roots' / 'old', target_is_directory=True)   # #461 之前的写法
+            except OSError as e:
+                self.skipTest(f'建不了软链（没开开发者模式、非提权）：{e}')
+            got = roots.link_target(short / 'roots' / 'old')
+            self.assertEqual(os.path.normcase(str(got)), os.path.normcase(str((long / 'roots' / 'v1').resolve())))
+            env = {'S2A_SHORT_ROOTS': f'{long}\t{short}'}
+            with patch.dict(os.environ, env):
+                roots.directory_link(short / 'roots' / 'v1', short / 'roots' / 'new', relative='v1')
+            link = short / 'roots' / 'new'
+            raw = os.readlink(link)
+            for prefix in ('\\\\?\\', '\\??\\'):
+                raw = raw[len(prefix):] if raw.startswith(prefix) else raw
+            self.assertEqual(os.path.normcase(raw), os.path.normcase(str(long / 'roots' / 'v1')))
+            os.stat(link); self.assertEqual(os.listdir(link), ['f'])
+        finally:
+            os.rmdir(short)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+index 971d8db0eb42999087dc92ded24ac6fa3163b969..4dd75ba91a0bb63e4f6d8f7c2e242591b3df38c3 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+@@ -186,11 +186,6 @@ namespace Ryujinx.Graphics.Nvdec
+             return null;
+         }
+ 
+-        // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR}: the bitstream literal is a table index,
+-        // not the enum value (read_interp_filter maps it back). Only the compressed-header (hardware) path
+-        // needs the remap — the libvpx path must keep the bytes it always emitted.
+-        private static readonly byte[] InterpLiteral = { 1, 0, 2, 3 };
+-
+         public static void TileRange(int width, out int minLog2, out int maxLog2)
+         {
+             int miCols = (width + 7) >> 3;
+@@ -308,7 +303,7 @@ namespace Ryujinx.Graphics.Nvdec
+                     b.Put(0, 1);
+                     b.Put(p.AllowHighPrecisionMv ? 1u : 0u, 1);
+                     b.Put(p.InterpFilter == 4 ? 1u : 0u, 1);
+-                    if (p.InterpFilter != 4) b.Put((uint)(mc ? InterpLiteral[p.InterpFilter] : p.InterpFilter), 2);
++                    if (p.InterpFilter != 4) b.Put((uint)p.InterpFilter, 2);
+                 }
+             }
+ 

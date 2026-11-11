@@ -369,6 +369,17 @@ class ImagePush(Base):
         self.assertEqual((nt, (self.w / "direct_img.tsv").read_text().split("\t")[0]), (1, "romfs.img"))
         self.assertTrue(any("被打断" in l for l in self.log))
 
+    def test_image_already_pushed_is_not_called_interrupted(self):
+        # #457：上次镜像整份传完、记进 .pushed，又有一批推完没解开（机上留着完整的 tar），之后解包没成，.applied 一直空。
+        #   期望（手写）：不重传镜像、也不说「被打断，这次重传」，如实说镜像已传完、问题在解包；b 在推送账上也不重推
+        f = self.phone(""); f[f"{INC}/20261110000000_000.tar"] = WHOLE
+        f[f"{RP}/.pushed"] = self.row("romfs.img").rsplit("\t", 1)[0].split("\t")[0] + "\t" + sha(b"IMAGE") + "\n" + "b\t" + sha(b"BB") + "\n"
+        self.dev = Fake(f)
+        nb, nt, n = push.plan(self.dev, self.pk, self.w, say=self.log.append)
+        self.assertEqual(nt, 0)
+        self.assertFalse(any("被打断" in l for l in self.log), self.log)
+        self.assertTrue(any("已整份传完" in l and "unpack.log" in l for l in self.log), self.log)
+
     def test_applied_image_is_not_pushed_again(self):
         self.dev = Fake(self.phone("abc"))
         self.assertEqual(push.plan(self.dev, self.pk, self.w, say=self.log.append)[1], 0)
@@ -396,6 +407,92 @@ class ImagePush(Base):
         self.dev.put_big = lambda src, rel: order.append(rel)
         push.plan(self.dev, self.pk, self.w, full=True, say=self.log.append); push.send(self.dev, self.pk, self.w, say=self.log.append)
         self.assertLess(order.index(f"{RP}/.applied"), order.index(f"{RP}/romfs.img"))
+
+
+P = push.IMG_PAGE
+
+
+def img(pack_id=b"f" * 64, body=b"D"):   # 假单一 IMG：第 0 页头（魔数、资源包号在 32..96），后面 3 整页 + 100 字节数据
+    head = bytearray(P); head[:8] = b"S2AIMG01"; head[32:32 + len(pack_id)] = pack_id
+    return bytes(head) + body * (3 * P + 100)
+
+
+class GameImgResume(Base):
+    """v0.3.0 单一 IMG（game.img）断点续传：机上开头一页与本地相同且资源包号不空 → 从机上长度按 16 KB 向下取整处接着写；否则整份重写"""
+    def setUp(self):
+        super().setUp()
+        self.local = img()
+        self.data = {"game.img": self.local, "b": b"BB"}
+        for k, v in self.data.items(): (self.pk / k).write_bytes(v)
+        (self.pk / "index.tsv").write_text("".join(self.row(k) for k in self.data))
+
+    def device(self, on_phone=None, head_ok=True, put_at_fails=False, short_after=False):
+        dev = Fake({} if on_phone is None else {f"{RP}/game.img": on_phone}); dev.big, dev.at = [], []
+        def put_big(src, rel): dev.big.append(rel); dev.files[rel] = Path(src).read_bytes()
+        def head(rel, n):
+            if not head_ok: return None
+            v = dev.files.get(rel); return (-1, b"") if v is None else (len(v), v[:n])
+        def put_at(src, rel, off):
+            if put_at_fails: raise push.Fail("断了")
+            dev.at.append((rel, off)); data = Path(src).read_bytes()
+            dev.files[rel] = dev.files[rel][:off] + data[off:len(data) - (1 if short_after else 0)]
+        dev.put_big, dev.head, dev.put_at = put_big, head, put_at
+        return dev
+
+    def push_it(self, dev):
+        self.dev = dev
+        push.plan(dev, self.pk, self.w, full=True, say=self.log.append); push.send(dev, self.pk, self.w, say=self.log.append)
+
+    def test_game_img_is_direct_not_tar(self):
+        self.dev = Fake({}); push.plan(self.dev, self.pk, self.w, full=True, say=self.log.append)
+        self.assertEqual((self.w / "direct_img.tsv").read_text().split("\t")[0], "game.img")
+        self.assertNotIn("game.img", (self.w / "push_000.tsv").read_text())
+
+    def test_resume_from_page_floor(self):   # 机上有前 2.5 页（同一份）→ 从第 2 页起续写，写完机上与本地逐字节相同
+        dev = self.device(self.local[:2 * P + P // 2]); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([(f"{RP}/game.img", 2 * P)], []))
+        self.assertEqual(dev.files[f"{RP}/game.img"], self.local)
+        self.assertTrue(any("续传 game.img" in l for l in self.log), self.log)
+
+    def test_other_pack_id_rewrites(self):   # 机上那份是别的资源包号（旧版本）→ 整份重写
+        dev = self.device(img(pack_id=b"e" * 64)[:2 * P]); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([], [f"{RP}/game.img"]))
+
+    def test_empty_pack_id_rewrites(self):   # 头里资源包号空：认不出是不是同一份 → 整份重写
+        self.local = img(pack_id=b""); (self.pk / "game.img").write_bytes(self.local); self.data["game.img"] = self.local
+        (self.pk / "index.tsv").write_text("".join(self.row(k) for k in self.data))
+        dev = self.device(self.local[:2 * P]); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([], [f"{RP}/game.img"]))
+
+    def test_phone_longer_rewrites(self):
+        dev = self.device(self.local + b"X"); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([], [f"{RP}/game.img"]))
+
+    def test_only_header_page_rewrites(self):   # 机上不足两页（只有头）：没东西可省，从头写
+        dev = self.device(self.local[:P + 10]); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([], [f"{RP}/game.img"]))
+
+    def test_old_tool_without_head_rewrites(self):
+        dev = self.device(self.local[:2 * P], head_ok=False); self.push_it(dev)
+        self.assertEqual((dev.at, dev.big), ([], [f"{RP}/game.img"]))
+
+    def test_resume_failure_falls_back_to_full(self):
+        dev = self.device(self.local[:2 * P], put_at_fails=True); self.push_it(dev)
+        self.assertEqual(dev.big, [f"{RP}/game.img"]); self.assertEqual(dev.files[f"{RP}/game.img"], self.local)
+        self.assertTrue(any("改为整份重写" in l for l in self.log), self.log)
+
+    def test_wrong_length_after_resume_fails(self):   # 续写后机上总长不对：不记账、报中断（说会接着续传）
+        dev = self.device(self.local[:2 * P], short_after=True)
+        with self.assertRaises(push.Fail) as e: self.push_it(dev)
+        self.assertIn("续传", str(e.exception))
+        self.assertNotIn(f"{RP}/.pushed", dev.files)
+
+    def test_romfs_img_never_resumes(self):   # 旧形态 romfs.img 没有 IMG 头：不读机上头、整份写
+        sys_img = b"OLDIMAGE" * 5000
+        (self.pk / "game.img").unlink(); (self.pk / "romfs.img").write_bytes(sys_img)
+        self.data = {"romfs.img": sys_img, "b": b"BB"}; (self.pk / "index.tsv").write_text("".join(self.row(k) for k in self.data))
+        dev = self.device(); dev.head = lambda *a: self.fail("旧形态不该读机上头"); self.push_it(dev)
+        self.assertEqual(dev.big, [f"{RP}/romfs.img"])
 
 
 class SendProgress(Base):

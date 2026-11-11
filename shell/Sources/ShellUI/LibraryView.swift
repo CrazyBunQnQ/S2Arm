@@ -1,3 +1,4 @@
+// S2Arm modification: present a dedicated sorting list and guard background library input while it is open.
 import SwiftUI
 
 /// How the library arranges itself. Only the available size decides, never the device model or orientation,
@@ -73,6 +74,7 @@ public struct LibraryView: View {
     /// How far the left-edge swipe has dragged the open settings or Controllers to the right.
     @State private var edgeDrag: CGFloat = 0
     @State private var libraryPosition = ScrollPosition()
+    @State private var gameOrderOpen = false
     @State private var layout: ShellLayout = .column
     @State private var returnFocus: String?
     /// The device that sent the last input, for the glyphs.
@@ -328,6 +330,21 @@ public struct LibraryView: View {
         .environment(\.shellIgnoresPress, { [gate] in gate.isSystemEcho })
         .environment(\.shellShowHelp, { game in openHelp(game.id) })
         .environment(\.shellAskDelete, actions.onDeleteGame == nil ? nil : { game in openDelete(game.id) })
+        .environment(\.shellOpenGameOrder, actions.onReorderGames == nil ? nil : {
+            guard libraryPressAllowed, noteTouch() else { return }
+            gameOrderOpen = true
+        })
+        #if os(iOS)
+        .fullScreenCover(isPresented: $gameOrderOpen) {
+            GameOrderView(games: games, reorder: actions.onReorderGames)
+                .preferredColorScheme(.dark)
+        }
+        #else
+        .sheet(isPresented: $gameOrderOpen) {
+            GameOrderView(games: games, reorder: actions.onReorderGames)
+                .preferredColorScheme(.dark)
+        }
+        #endif
         .environment(\.shellFocus, focus)
         .environment(\.shellInputDevice, device)
         .foregroundStyle(.white)
@@ -414,7 +431,16 @@ public struct LibraryView: View {
                             .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 32 + insets.bottom)
                             // A phone on its side: a readable column, not rows stretched across the whole width.
                             .frame(maxWidth: 640, alignment: .leading)
-                            .padding(.leading, insets.leading).padding(.trailing, insets.trailing)
+                            // A floating pane sits on the screen's trailing edge, so the window's trailing
+                            // safe inset is positional — the pane's own frame already ends at the safe edge,
+                            // and padding the content by that inset a second time stacks 59pt of dead space
+                            // on the trailing side only (device-measured: card margins 24 leading / 83
+                            // trailing). Inside a floating pane the horizontal margins are the content's
+                            // own 24 on both sides; the banner above still bleeds edge to edge with the
+                            // full insets. Full-screen panes keep the insets. (The same ruling GameCase's
+                            // settings column ships with.)
+                            .padding(.leading, floating ? 0 : insets.leading)
+                            .padding(.trailing, floating && !SensorEdge.onTrailing ? 0 : insets.trailing)   // 灵动岛转到右边时照扣，不然右侧开关被它盖住（SensorEdge）
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -492,7 +518,7 @@ public struct LibraryView: View {
     /// Under a dialog or a panel no finger reaches the library (it takes no hits there), so a press on its buttons is the
     /// system's echo of a controller button, whatever the window says: a finger that came down elsewhere just before the
     /// echo (a tap in the settings pane right after A) ends the window, and Play behind the pane started the game.
-    private var libraryPressAllowed: Bool { FocusLayer.libraryTakesPress(fromShell: gate.handling, under: topLayer) }
+    private var libraryPressAllowed: Bool { !gameOrderOpen && FocusLayer.libraryTakesPress(fromShell: gate.handling, under: topLayer) }
     private func primary(_ detail: GameDetail) {
         guard libraryPressAllowed, noteTouch() else { return }
         if detail.game.state.needsHelp { openHelp(detail.id); return }
@@ -652,6 +678,10 @@ public struct LibraryView: View {
         gate.handling = true
         defer { gate.handling = false }
         if case .controller = source { gate.controller(action) }
+        if gameOrderOpen {
+            if action == .back { gameOrderOpen = false }
+            return
+        }
         // Every controller button belongs to the button test while it is open: it closes on B held, touch or Escape.
         if buttonTestOpen, case .controller = source { return }
         if device != source { device = source }

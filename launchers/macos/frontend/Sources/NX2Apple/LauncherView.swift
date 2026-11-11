@@ -52,7 +52,9 @@ struct LauncherView: View {
             topBar
             Divider().opacity(0.3)
             noticeBar
-            if let result = model.viewingResult, let run = result.export {
+            if model.batchShown {
+                BatchExportView(model: model, covers: covers, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
+            } else if let result = model.viewingResult, let run = result.export {
                 ExportSessionView(model: model, covers: covers, session: result, run: run, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
             } else if let session = model.session, let run = session.export, !model.sessionHidden {
                 ExportSessionView(model: model, covers: covers, session: session, run: run, install: { installFor = $0 }, freeSpace: { spaceFor = $0 }, uiLanguage: uiLanguage)
@@ -87,7 +89,7 @@ struct LauncherView: View {
         .tint(LauncherPalette.cream)
         .font(.manrope(13))
         .frame(minWidth: 900, idealWidth: 1280, minHeight: 680, idealHeight: 900)
-        .onAppear { model.refresh(); model.checkEnvironment(); model.startControl(); model.finishPendingUpdate(); model.checkForUpdate(); model.loadNotice(); model.startControllerConnection() }
+        .onAppear { model.refresh(); model.checkEnvironment(); model.startControl(); model.finishPendingUpdate(); model.checkForUpdate(); model.loadNotice(); model.recoverBatch(); model.startControllerConnection() }
         .sheet(item: Binding(get: { installFor.map(OptionsTarget.init) }, set: { installFor = $0?.id })) { target in
             InstallView(model: model, gameID: target.id).environmentObject(loc)
         }
@@ -135,6 +137,8 @@ struct LauncherView: View {
         HStack(spacing: 12) {
                 if model.loading { ProgressView().controlSize(.small) }
                 exportPill
+                batchPill
+                PhoneUpdateButton(model: model, language: uiLanguage)
                 phonePill
                 ControllerToolbarButton(controller: model.controller, show: $showController,
                                         simplifiedChinese: loc.lang == .zh)
@@ -267,6 +271,21 @@ struct LauncherView: View {
     }
 
     func txt(_ id: String) -> String { BackendText.launcherText(id, language: uiLanguage) }
+
+    /// 批量出包（v0.2.4）：清单页没开着时，这批正在出 / 上次还有没出完的 → 顶部胶囊回到清单页
+    @ViewBuilder private var batchPill: some View {
+        if !model.batchShown, model.batchRunning || model.batchUnfinished > 0 {
+            Button { model.batchShown = true } label: {
+                HStack(spacing: 7) {
+                    if model.batchRunning { ProgressView().controlSize(.mini) } else { Image(systemName: "list.bullet.rectangle") }
+                    Text(model.batchRunning ? BackendText.launcherText("batch.title", language: uiLanguage)
+                         : BackendText.launcherText("batch.unfinished", language: uiLanguage).replacingOccurrences(of: "{0}", with: "\(model.batchUnfinished)"))
+                        .font(.manrope(12.5, .semibold)).lineLimit(1)
+                }
+            }
+            .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("top.batch")
+        }
+    }
 
     /// 收起运行页、或还有排队时：顶部这颗胶囊回到出包页。
     @ViewBuilder private var exportPill: some View {

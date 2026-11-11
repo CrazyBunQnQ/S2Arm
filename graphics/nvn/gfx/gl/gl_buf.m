@@ -49,7 +49,7 @@ static struct gl_buffer *bound(GLenum target) {
 }
 GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) { @autoreleasepool {
     (void)usage; CTX();
-    struct gl_buffer *b = bound(target); if (!b) { gl_set_error(GL_INVALID_OPERATION); return; }
+    struct gl_buffer *b = bound(target); if (!b || b->storage) { gl_set_error(GL_INVALID_OPERATION); return; }   // 不可变存储不许 BufferData（GL 4.5 §6.2）
     if (size < 0) { gl_set_error(GL_INVALID_VALUE); return; }
     gl_dev_init();
     @autoreleasepool {
@@ -61,16 +61,28 @@ GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum
         b->map_access = 0;   // 规范：对映射着的缓冲 BufferData 先隐式解除映射（旧存储随之丢弃）
     }
 }}
+// 不可变存储（GL 4.4 / 4.5 §6.2，Balatro 所用的 LÖVE 引擎在 4.4 以上用它建流式缓冲：建一次、持久映射、每帧往里写、靠栅栏错开 GPU 在读的那段）。
+//   存储同 glBufferData（共享 MTLBuffer），记下标志位：之后不许再 BufferData，没有 DYNAMIC_STORAGE 不许 SubData，映射位要在标志里（glMapBufferRange 核）
+enum { GL_MAP_PERSISTENT_BIT = 0x40, GL_MAP_COHERENT_BIT = 0x80, GL_DYNAMIC_STORAGE_BIT = 0x100, GL_CLIENT_STORAGE_BIT = 0x200 };
+GLB(glBufferStorage, void, GLenum target, GLsizeiptr size, const void *data, GLbitfield flags) { @autoreleasepool {
+    CTX();
+    if (target != GL_ELEMENT_ARRAY_BUFFER && buf_slot(target) < 0) { GLRED1("glBufferStorage 目标 %#x 没实现", target); gl_set_error(GL_INVALID_ENUM); return; }
+    if (size <= 0 || (flags & ~(GLbitfield)0x3C3)) { gl_set_error(GL_INVALID_VALUE); return; }   // 只认 MAP_READ / WRITE / PERSISTENT / COHERENT / DYNAMIC_STORAGE / CLIENT_STORAGE
+    if (((flags & GL_MAP_PERSISTENT_BIT) && !(flags & 3)) || ((flags & GL_MAP_COHERENT_BIT) && !(flags & GL_MAP_PERSISTENT_BIT))) { gl_set_error(GL_INVALID_VALUE); return; }
+    struct gl_buffer *b = bound(target); if (!b || b->storage) { gl_set_error(GL_INVALID_OPERATION); return; }
+    gl_glBufferData(target, size, data, 0);
+    if (b->buf) b->storage = flags | 0x80000000u;   // 高位：建过（flags 可以是 0）
+}}
 // 当前前端只有 CPU 写缓冲：在途存储的 CPU 内容仍是最新值。复制后换存储，保留此前绘制读到的内容，不切渲染遍。
 GLB(glBufferSubData, void, GLenum target, GLintptr off, GLsizeiptr size, const void *data) { @autoreleasepool {
     CTX();
     if (target != GL_ELEMENT_ARRAY_BUFFER && buf_slot(target) < 0) { GLRED1("glBufferSubData 目标 %#x 没实现", target); gl_set_error(GL_INVALID_ENUM); return; }
     struct gl_buffer *b = bound(target);
-    if (!b || !b->buf || b->map_access) { gl_set_error(GL_INVALID_OPERATION); return; }   // 映射着的缓冲不许 SubData（规范）
+    if (!b || !b->buf || (b->map_access && !(b->map_bits & GL_MAP_PERSISTENT_BIT)) || (b->storage && !(b->storage & GL_DYNAMIC_STORAGE_BIT))) { gl_set_error(GL_INVALID_OPERATION); return; }   // 映射着（持久映射除外）/ 不可变且没有 DYNAMIC_STORAGE 不许 SubData（规范）
     if (off < 0 || size < 0 || (size_t)off > b->size || (size_t)size > b->size - (size_t)off) { gl_set_error(GL_INVALID_VALUE); return; }
     if (!size) return;
     @autoreleasepool {
-        if (gl_buffer_busy(b)) {
+        if (gl_buffer_busy(b) && !b->map_access) {   // 持久映射着：游戏拿着的指针指向这份存储，不能换（游戏自己用栅栏错开）
             id<MTLBuffer> next = [gl_dev newBufferWithLength:b->size options:MTLResourceStorageModeShared];
             if (!next) { GLOG("【红】 glBufferSubData 存储分配失败（%zu 字节）", b->size); gl_set_error(GL_OUT_OF_MEMORY); return; }
             memcpy(next.contents, b->buf.contents, b->size);
@@ -133,11 +145,15 @@ GLB(glMapBufferRange, void *, GLenum target, GLintptr off, GLsizeiptr len, GLbit
     CTX(NULL);
     if (target != GL_ELEMENT_ARRAY_BUFFER && buf_slot(target) < 0) { GLRED1("glMapBufferRange 目标 %#x 没实现", target); gl_set_error(GL_INVALID_ENUM); return NULL; }
     struct gl_buffer *b = bound(target); if (!b) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
-    if (off < 0 || len <= 0 || (size_t)off > b->size || (size_t)len > b->size - (size_t)off || (access & ~(GLbitfield)0x3F)) { gl_set_error(GL_INVALID_VALUE); return NULL; }
-    int rd = access & GL_MAP_READ_BIT, wr = access & GL_MAP_WRITE_BIT;
+    if (off < 0 || len <= 0 || (size_t)off > b->size || (size_t)len > b->size - (size_t)off || (access & ~(GLbitfield)0xFF)) { gl_set_error(GL_INVALID_VALUE); return NULL; }
+    int rd = access & GL_MAP_READ_BIT, wr = access & GL_MAP_WRITE_BIT, pers = access & GL_MAP_PERSISTENT_BIT;
     if (!b->buf || b->map_access || (!rd && !wr) || (rd && (access & (GL_MAP_INVALIDATE_RANGE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT))) ||
         ((access & GL_MAP_FLUSH_EXPLICIT_BIT) && !wr)) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
-    if (wr && !(access & GL_MAP_UNSYNCHRONIZED_BIT) && gl_buffer_busy(b)) { @autoreleasepool {
+    // 持久 / 一致映射只对不可变存储、且建存储时带了同样的位（读写位也要在里面）；一致映射要求持久（GL 4.5 §6.3）
+    if ((access & (GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT)) && (!b->storage || (access & (GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | 3) & ~b->storage) || ((access & GL_MAP_COHERENT_BIT) && !pers))) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
+    if (b->storage && (access & 3 & ~b->storage)) { gl_set_error(GL_INVALID_OPERATION); return NULL; }
+    // 持久映射交出的指针游戏一直拿着写：不换存储（换了它写的就是旧存储，绘制读不到）；它跟 GPU 的错开由游戏自己的栅栏保证（规范要求）
+    if (wr && !pers && !(access & GL_MAP_UNSYNCHRONIZED_BIT) && gl_buffer_busy(b)) { @autoreleasepool {
         id<MTLBuffer> next = [gl_dev newBufferWithLength:b->buf.length options:MTLResourceStorageModeShared];
         if (!next) { GLOG("【红】 glMapBufferRange 存储分配失败（%zu 字节）", (size_t)b->buf.length); gl_set_error(GL_OUT_OF_MEMORY); return NULL; }
         if (!(access & GL_MAP_INVALIDATE_BUFFER_BIT)) memcpy(next.contents, b->buf.contents, b->buf.length);
@@ -167,7 +183,18 @@ GL(glVertexAttribDivisor, void, GLuint i, GLuint divisor) {
     v->a[i].divisor = divisor; gl_cur->dirty |= GLD_PIPE | GLD_VB;
 }
 // 当前通用顶点属性（上下文状态，不属于顶点数组）：数组关掉的属性读它（gl_draw.m setup）
-GL(glVertexAttrib1f, void, GLuint i, GLfloat x) {
-    CTX(); if (i >= 16) { gl_set_error(GL_INVALID_VALUE); return; }
-    gl_cur->attr_cur[i][0] = x; gl_cur->attr_cur[i][1] = 0; gl_cur->attr_cur[i][2] = 0; gl_cur->attr_cur[i][3] = 1; gl_cur->dirty |= GLD_VB;
+//   没给的分量按规范补 (0, 0, 1)：glVertexAttrib4fv 是 Balatro（LÖVE 引擎）建上下文后的第一笔调用，原先查表回空，游戏跳到地址 0 闪退
+static void attr_cur_set(GLuint i, int n, const GLfloat *v) {
+    if (i >= 16) { gl_set_error(GL_INVALID_VALUE); return; }
+    static const GLfloat def[4] = {0, 0, 0, 1};
+    for (int k = 0; k < 4; k++) gl_cur->attr_cur[i][k] = k < n ? v[k] : def[k];
+    gl_cur->dirty |= GLD_VB;
 }
+GL(glVertexAttrib1f, void, GLuint i, GLfloat x) { CTX(); attr_cur_set(i, 1, &x); }
+GL(glVertexAttrib2f, void, GLuint i, GLfloat x, GLfloat y) { CTX(); GLfloat v[2] = {x, y}; attr_cur_set(i, 2, v); }
+GL(glVertexAttrib3f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z) { CTX(); GLfloat v[3] = {x, y, z}; attr_cur_set(i, 3, v); }
+GL(glVertexAttrib4f, void, GLuint i, GLfloat x, GLfloat y, GLfloat z, GLfloat w) { CTX(); GLfloat v[4] = {x, y, z, w}; attr_cur_set(i, 4, v); }
+GL(glVertexAttrib1fv, void, GLuint i, const GLfloat *v) { CTX(); attr_cur_set(i, 1, v); }
+GL(glVertexAttrib2fv, void, GLuint i, const GLfloat *v) { CTX(); attr_cur_set(i, 2, v); }
+GL(glVertexAttrib3fv, void, GLuint i, const GLfloat *v) { CTX(); attr_cur_set(i, 3, v); }
+GL(glVertexAttrib4fv, void, GLuint i, const GLfloat *v) { CTX(); attr_cur_set(i, 4, v); }

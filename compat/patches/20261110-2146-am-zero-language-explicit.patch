@@ -1,0 +1,45 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index c26f8c68af53e0c0b651443a0bb63a3bdc30dab8..cd983170a786b3a45559701345ecb30dad44cc11 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -149,9 +149,12 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             {
+                 // 支持语言位为 0（旧版导入合成的 control.nacp 没写这一项，#401）：原样回系统语言（如 zh-Hans）时游戏判为无效语言、去读不存在的语言资源，一直黑屏。
+                 // 退到美式英语，与出包合成件的缺省（只声明美式英语）同一口径，已导入的旧库不用重新导入
+-                Logger.Warning?.Print(LogClass.ServiceAm, "Application has zero supported languages, using AmericanEnglish");
++                // 玩家显式指定了系统语言（S2A_SYSTEM_LANGUAGE，S2AHooks.ExplicitSystemLanguage）时听玩家的：支持位为 0 只说明不知道游戏支持什么，
++                // 游戏本身支持该语言的（11-10 程序号 0400486024DEC000：此前系统日语下显示日语）不该被改成英语
++                bool chosen = S2AHooks.ExplicitSystemLanguage;
++                Logger.Warning?.Print(LogClass.ServiceAm, chosen ? "Application has zero supported languages, using the explicitly chosen system language" : "Application has zero supported languages, using AmericanEnglish");
+ 
+-                context.ResponseData.Write(SystemStateMgr.GetLanguageCode((int)SystemLanguage.AmericanEnglish));
++                context.ResponseData.Write(ZeroSupportedLanguageCode(desiredLanguageCode, chosen));
+ 
+                 return ResultCode.Success;
+             }
+@@ -171,6 +174,10 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: 支持语言位为 0 时回给游戏的语言码：缺省美式英语（#401）；玩家显式指定了系统语言就回它
++        internal static long ZeroSupportedLanguageCode(long systemLanguageCode, bool explicitSystemLanguage) =>
++            explicitSystemLanguage ? systemLanguageCode : SystemStateMgr.GetLanguageCode((int)SystemLanguage.AmericanEnglish);
++
+         // S2Arm: the first of the host's fallback languages the game supports, else the game's first supported language (upstream)
+         internal static int PickFallbackLanguage(int supportedLanguages, TitleLanguage[] fallback)
+         {
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 69b1aee5c8fd99683664e5fc6659057a48e595ba..d58cac1a8a68aa1845282e2a90d7a07c77c028fe 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -18,6 +18,10 @@ namespace Ryujinx.HLE
+         // (the host passes the system's preferred languages, then Simplified / Traditional Chinese, then English). Null = upstream.
+         public static Ryujinx.HLE.HOS.SystemState.TitleLanguage[] TitleLanguageFallback;
+ 
++        // The system language was chosen explicitly (S2A_SYSTEM_LANGUAGE) rather than taken from the device: GetDesiredLanguage returns it
++        // even when the game's control data declares no supported languages (otherwise American English, #401).
++        public static bool ExplicitSystemLanguage;
++
+         // KReadableEvent bound to a native event (KReadableEvent.S2ANativeEvent != 0): mirror Signal / Clear to it,
+         // because the game waits on the native event (WaitSynchronization never enters C#).
+         public static delegate*<ulong, void> EventSignal;

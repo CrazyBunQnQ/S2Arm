@@ -188,12 +188,24 @@ class MakePackRewriterTest(unittest.TestCase):
         self.assertIn('# TARGET\tandroid', (out / 'modules/main.fixups.tsv').read_text())
 
     def test_inherited_fps_table_does_not_reach_cli(self):
-        # #48 D2：安卓没链 runtime/src/fps.c，读槽指令打进去槽一直是 0；环境里留着的 S2A_FPS_TSV 不许交给改写器
+        # #48 D2：改写器只认产物根自己的 fps.tsv；环境里留着的 S2A_FPS_TSV 不交给改写器、也不进包
         table = self.directory / 'fps.tsv'
         table.write_text('# 夹具：内容不被读到\n')
         wrapper = self.wrapper('fps')
-        self.make(S2A_REWRITER_C=wrapper, S2A_FPS_TSV=str(table))
+        out, _ = self.make(S2A_REWRITER_C=wrapper, S2A_FPS_TSV=str(table))
         self.assertIsNone(json.loads(Path(wrapper + '.fps.json').read_text()))
+        self.assertFalse((out / 'fps.tsv').exists())
+
+    def test_product_fps_table_reaches_cli_and_package(self):
+        # #48 D2：产物根的 fps.tsv 交给改写器（读槽指令），同一份进游戏数据根给 runtime/src/fps.c 起局写槽；环境里的另一份不顶替它
+        table = self.root / 'fps.tsv'
+        table.write_text('build 0000000000000000\nslot 2041 f32 2 1\n')
+        stray = self.directory / 'stray-fps.tsv'
+        stray.write_text('# 环境里的另一份\n')
+        wrapper = self.wrapper('fps')
+        out, _ = self.make(S2A_REWRITER_C=wrapper, S2A_FPS_TSV=str(stray))
+        self.assertEqual(json.loads(Path(wrapper + '.fps.json').read_text()), str(table))
+        self.assertEqual((out / 'fps.tsv').read_bytes(), table.read_bytes())
 
     def test_selector_and_execution_failures_preserve_previous_output(self):
         for mode, settings in [('backend',dict(backend='invalid')),('missing',dict(S2A_REWRITER_C=str(self.directory/'absent'))),

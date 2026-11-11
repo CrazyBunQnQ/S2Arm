@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 28f2bc1f77266d742750bc6a4bd8a334ada78732..1eb307161881191c6058ebb6e7fa81bb6f00926a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -161,7 +161,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+ 
+             // If desired language is not supported by application, use first supported language from TitleLanguage.
+             // TODO: In the future, a GUI could enable user-specified search priority
+-            // S2Arm: 退路由宿主给（S2AHooks.TitleLanguageFallback = 主语言、同族变体、美式 / 英式英语，services SystemLocale.TitleFallback），都不中才取支持表第一项；
++            // S2Arm: 退路由宿主给（S2AHooks.TitleLanguageFallback = 主语言、同族变体、美式 / 英式英语、简 / 繁中，services SystemLocale.TitleFallback），都不中才取支持表第一项；
+             //   一行日志写清宿主主语言、支持表、最终选择和第几步（#445：原先只在退路时打「Using X」，看不出是哪一步选到的）
+             TitleLanguage hostLanguage = context.Device.System.State.DesiredTitleLanguage;
+             int picked = PickDesiredLanguage(hostLanguage, supportedLanguages, S2AHooks.TitleLanguageFallback);
+@@ -186,14 +186,16 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+         internal static int PickDesiredLanguage(TitleLanguage hostLanguage, int supportedLanguages, TitleLanguage[] fallback) =>
+             ((1 << (int)hostLanguage) & supportedLanguages) != 0 ? (int)hostLanguage : PickFallbackLanguage(supportedLanguages, fallback);
+ 
+-        // S2Arm: 选到的语言走的是第几步（日志用）：① 主语言、② 同族变体、③ 英语、④ 支持表第一项
++        // S2Arm: 选到的语言走的是第几步（日志用）：① 主语言、② 同族变体、③ 英语、④ 中文、⑤ 支持表第一项
+         internal static string LanguageStep(TitleLanguage hostLanguage, int picked, TitleLanguage[] fallback)
+         {
+             if (picked == (int)hostLanguage) return "第 1 步：宿主主语言";
+-            if (Array.IndexOf(fallback ?? Array.Empty<TitleLanguage>(), (TitleLanguage)picked) < 0) return "第 4 步：游戏支持表第一项";
++            if (Array.IndexOf(fallback ?? Array.Empty<TitleLanguage>(), (TitleLanguage)picked) < 0) return "第 5 步：游戏支持表第一项";
+             bool english = picked == (int)TitleLanguage.AmericanEnglish || picked == (int)TitleLanguage.BritishEnglish;
+             bool hostEnglish = hostLanguage == TitleLanguage.AmericanEnglish || hostLanguage == TitleLanguage.BritishEnglish;
+-            return english && !hostEnglish ? "第 3 步：英语" : "第 2 步：同族变体";
++            bool chinese = picked == (int)TitleLanguage.SimplifiedChinese || picked == (int)TitleLanguage.TraditionalChinese;
++            bool hostChinese = hostLanguage == TitleLanguage.SimplifiedChinese || hostLanguage == TitleLanguage.TraditionalChinese;
++            return english && !hostEnglish ? "第 3 步：英语" : chinese && !hostChinese ? "第 4 步：中文" : "第 2 步：同族变体";
+         }
+ 
+         // S2Arm: the first of the host's fallback languages the game supports, else the game's first supported language (upstream)

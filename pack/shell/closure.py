@@ -11,6 +11,9 @@ make ios 由 clang / dotnet / Python / cp 等多种进程组成，阶段键的 P
   closure.py check   [<仓库根>]           出壳后：被读过、但输入表 pack/stage_inputs/shell.tsv 没覆盖（不是「入」/「外」的文件，也不在其列的目录下）→ 逐个点名、退出 1
   closure.py pyimports [<仓库根>]          不出壳的静态核对（11-06 维护者：列车没有出壳这一步，#1586 让 pack/ship_ext.py import 新增的 tools/module_order.py、
                                          没登记就合进 main，全线出壳红）：表里「入」的 .py 逐个解析 import，顺着解析到的仓库模块递归，没被表覆盖的报红；几秒内跑完
+  closure.py csiblings [<仓库根>]          不出壳的静态核对（11-10 v0.2.3 出壳红：单只 Joy-Con 2 新增 runtime/ns2pro/NS2JoyCon.c 没登记，列车没有出壳这一步）：
+                                         表里逐文件登记过的目录下，git 跟踪的 C 系文件（.c .m .mm .cpp .h .hpp .inc）必须是「入」「外」或「不」（不编进壳）之一；
+                                         没登记的点名、退 1。「不」行只给本核对用，出壳闭包与壳编号都不认它
   closure.py suggest [<仓库根>]           冷出壳后：把被读过的文件收成表行（目录里跟踪文件被读 ≥ 80% 的整目录收成一行，多收只会多重出壳、不会漏）
 
 新依赖只能经由已登记文件的改动引入（加 #include、加源文件都要改已登记的源码 / 构建脚本），而改动必然让那部分重编、新文件被读到，
@@ -93,6 +96,22 @@ def covered(f, rows):
     return any(f == p or f.startswith(p + '/') for _, p in rows)
 
 
+C_FAMILY = ('.c', '.m', '.mm', '.cpp', '.h', '.hpp', '.inc')
+
+
+def c_siblings(repo):
+    """→ 表里逐文件登记过的目录下、没登记的 git 跟踪 C 系文件（排序）。「不」行（不编进壳）算已登记；整目录登记的目录下本来就全覆盖，不用看"""
+    rows = table(repo)
+    no = set()
+    with open(os.path.join(repo, TABLE), encoding='utf-8') as t:
+        for line in t:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) >= 2 and parts[0] == '不': no.add(parts[1].rstrip('/'))
+    files = tracked(repo); fs = set(files)
+    dirs = {os.path.dirname(p) for _, p in rows if p in fs}
+    return sorted(f for f in files if f.endswith(C_FAMILY) and os.path.dirname(f) in dirs and f not in no and not covered(f, rows))
+
+
 def py_imports(repo, rows):
     """静态 Python import 闭包：起点 = 表里「入」的 .py（含「入」目录下的 .py）；模块搜索根 = 本文件目录、仓库根、
     本文件里以字符串字面量出现的仓库一级目录（覆盖 sys.path.insert(0, str(REPO / 'tools')) 这类写法）。只认解析得到仓库文件的模块，标准库 / 三方包自然跳过。
@@ -165,8 +184,14 @@ def suggest(repo, seen, frac=0.8):
 
 
 def main(a):
-    if not a or a[0] not in ('mark', 'observed', 'check', 'suggest', 'pyimports'): print(__doc__, file=sys.stderr); return 2
+    if not a or a[0] not in ('mark', 'observed', 'check', 'suggest', 'pyimports', 'csiblings'): print(__doc__, file=sys.stderr); return 2
     repo = os.path.abspath(a[1]) if len(a) > 1 else R0
+    if a[0] == 'csiblings':
+        repo = a[1] if len(a) > 1 else '.'
+        miss = c_siblings(repo)
+        for f in miss: print(f'【红】{f}：和表里逐文件登记的源码同目录，却没登记（编进壳记「入」，只读不影响产物记「外」，不编进壳记「不」）')
+        print(f"壳输入表同目录 C 系核对：{'漏登记 ' + str(len(miss)) + ' 个' if miss else '0 个漏登记'}")
+        return 1 if miss else 0
     if a[0] == 'pyimports':
         miss = py_imports(repo, table(repo))
         if miss:

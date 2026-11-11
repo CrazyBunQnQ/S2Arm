@@ -9,6 +9,7 @@
 #include "NS2Module.h"
 #include "pad_liveness.h"
 #include "haptic_retry.h"
+#include "ea_rumble.h"   // GameSir G8+ MFi 有线：手柄马达走配件协议（#462）
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -57,6 +58,7 @@ static uint64_t g_phone_epoch;
 static s2a_pad_vibration g_phone_pair[2];
 
 static void system_stop_on_queue(void) {
+    s2a_ea_rumble_stop();
     if (g_haptic_player && g_haptic_playing) [g_haptic_player stopAtTime:CHHapticTimeImmediate error:nil];
     g_haptic_playing = NO;
     if (g_haptic_timer) dispatch_source_set_timer(g_haptic_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
@@ -105,6 +107,15 @@ static void system_fail_on_queue(const char *what, NSError *error) {
     if (died) LOG("【红】系统手柄震动：本设备本局停用（连续 %d 次失败，最后一次 %s/%ld）；换手柄或重新接入会再试一次",
                   S2A_HP_MAX_FAILS, domain, code);
 }
+// 1 秒没有新的震动帧就停（游戏不发停止也不会一直震）
+static void system_arm_stop_timer(void) {
+    if (!g_haptic_timer) {
+        g_haptic_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_system_haptics_queue);
+        dispatch_source_set_event_handler(g_haptic_timer, ^{ system_stop_on_queue(); });
+        dispatch_resume(g_haptic_timer);
+    }
+    dispatch_source_set_timer(g_haptic_timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
+}
 static void system_play_on_queue(s2a_pad_vibration pair[2]) {
     float amplitude = 0, weighted = 0, weights = 0;
     for (int i = 0; i < 2; i++) {
@@ -114,6 +125,12 @@ static void system_play_on_queue(s2a_pad_vibration pair[2]) {
         weights += lo + hi;
     }
     if (amplitude <= 0.001f) { system_stop_on_queue(); return; }
+    // 走配件协议的手柄（#462）：左右两侧振幅直接发给手柄马达；Core Haptics 会把这只手柄的震动送到机身，不走它
+    if (s2a_ea_rumble_active()) {
+        s2a_ea_rumble_set(fmaxf(finite_clamp(pair[0].low_amp, 0, 1), finite_clamp(pair[0].high_amp, 0, 1)),
+                          fmaxf(finite_clamp(pair[1].low_amp, 0, 1), finite_clamp(pair[1].high_amp, 0, 1)));
+        system_arm_stop_timer(); return;
+    }
     // 退避期 / 已判死：一个 CoreHaptics 调用都不碰。游戏每秒提交约 29 次震动，这条路径必须廉价。
     if (s2a_hp_should_try(&g_haptic_retry, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) == S2A_HP_SKIP) return;
     float hz = weights > 0 ? weighted / weights : 160;
@@ -165,12 +182,7 @@ static void system_play_on_queue(s2a_pad_vibration pair[2]) {
     }
     s2a_hp_on_ok(&g_haptic_retry);   // 真正播起来了才清零连续失败
     static BOOL logged; if (!logged) { logged = YES; LOG("系统手柄震动：播放 强度 %.2f 锐度 %.2f", amplitude, sharp); }
-    if (!g_haptic_timer) {
-        g_haptic_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_system_haptics_queue);
-        dispatch_source_set_event_handler(g_haptic_timer, ^{ system_stop_on_queue(); });
-        dispatch_resume(g_haptic_timer);
-    }
-    dispatch_source_set_timer(g_haptic_timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
+    system_arm_stop_timer();
 }
 
 static void system_select_device(GCController *device) {
@@ -189,6 +201,7 @@ static void system_select_device(GCController *device) {
     });
     pthread_mutex_unlock(&g_feedback_mu);
     if (device) LOG("系统手柄震动：%s", device.haptics ? "支持" : "不支持震动");
+    s2a_ea_rumble_refresh();   // 换手柄：重判是不是走配件协议的那只
 }
 static void system_sync_selection(void) {
     pthread_mutex_lock(&g_feedback_mu);
@@ -245,8 +258,18 @@ static void phone_submit_locked(const s2a_pad_vibration pair[2], BOOL stop) {
         if (valid) { if (stop_now) s2a_phone_rumble_stop(); else s2a_phone_rumble_pair(copy); }
     });
 }
+// 震动被丢掉时各打一行（每种原因本局只打一次，#466）：原先送到原生层后会话号对不上、手柄没选中、切换中都静默返回，
+//   玩家「iOS 上外接手柄一律不震」时日志里看不出断在哪一步。位：1 手机马达代次过期、2 系统手柄不收、4 会话不是任何一路
+static _Atomic unsigned g_rumble_drop_logged;
+static BOOL rumble_drop_first(unsigned bit) { return !(atomic_fetch_or(&g_rumble_drop_logged, bit) & bit); }
 static void system_submit_locked(uint64_t session, const s2a_pad_vibration pair[2]) {
-    if (!session || session != (SYSTEM_SESSION_BASE | g_system_epoch) || !g_system_selected || !g_system_supported || g_system_transition || !s2a_pad_has_controller()) return;
+    if (!session || session != (SYSTEM_SESSION_BASE | g_system_epoch) || !g_system_selected || !g_system_supported || g_system_transition || !s2a_pad_has_controller()) {
+        if (rumble_drop_first(2))
+            LOG("游戏震动：系统手柄这一路不收，丢弃（会话 %#llx / 当前 %#llx，选中 %d，手柄支持震动 %d，切换中 %d，生效来源是实体手柄 %d；本局只报一次）",
+                (unsigned long long)session, (unsigned long long)(SYSTEM_SESSION_BASE | g_system_epoch), (int)g_system_selected, (int)g_system_supported,
+                (int)g_system_transition, s2a_pad_has_controller());
+        return;
+    }
     memcpy(g_system_pair, pair, sizeof g_system_pair);
     if (g_system_pending) return;
     g_system_pending = YES;
@@ -318,6 +341,7 @@ static void ble_status(ns2_status status, const char *message, void *context) {
     });
 }
 
+static void log_controllers(int why);   // 下面 systemChanged 旁：GameController 枚举诊断（#456）
 @implementation S2AController {
     __weak UIView *_root;
     UIButton *_connect;
@@ -340,6 +364,7 @@ static void ble_status(ns2_status status, const char *message, void *context) {
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(systemChanged:) name:GCControllerDidDisconnectNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged:) name:NSUserDefaultsDidChangeNotification object:nil];
     pad_face_sync();
+    log_controllers(0);
     return self;
 }
 - (void)createConnectionButton {
@@ -576,9 +601,22 @@ static void pad_face_sync(void) {
     if (_foreground && _hasSystem) [self stopBLE:"system controller selected"];
     [self updateVisibility];
 }
+// 诊断（#456）：列出 GameController 枚举到的全部设备与 profile。只有带 extendedGamepad 的才会被选成系统手柄并打「接入」，
+//   第三方手柄的 Switch 模式若被枚举成只有 micro / 没有标准 profile，或根本没被枚举，原先日志里一片空白，分不清卡在系统层还是 App 层
+static void log_controllers(int why) {   // why：0 启动时、1 连接通知、2 断开通知
+    NSMutableArray<NSString *> *list = [NSMutableArray array];
+    for (GCController *c in GCController.controllers)
+        [list addObject:[NSString stringWithFormat:@"%@|%@|%@", c.vendorName ?: @"?", c.productCategory ?: @"?",
+                         c.extendedGamepad ? @"extended" : c.microGamepad ? @"micro" : @"none"]];
+    const char *items = [list componentsJoinedByString:@"; "].UTF8String ?: "";
+    if (why == 0) LOG("系统手柄：启动时枚举到 %d 个 %s", (int)list.count, items);
+    else if (why == 1) LOG("系统手柄：连接通知，枚举到 %d 个 %s", (int)list.count, items);
+    else LOG("系统手柄：断开通知，枚举到 %d 个 %s", (int)list.count, items);
+}
 - (void)systemChanged:(NSNotification *)notification {
     // 框架通知线程不作假设，设备输入本身仍只在 inputQueue 处理。
-    dispatch_async(dispatch_get_main_queue(), ^{ [self selectSystem]; });
+    BOOL connected = [notification.name isEqualToString:GCControllerDidConnectNotification];
+    dispatch_async(dispatch_get_main_queue(), ^{ log_controllers(connected ? 1 : 2); [self selectSystem]; });
 }
 - (void)stopBLE:(const char *)reason {
     _blePaused = _bleResuming = NO;
@@ -762,6 +800,7 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64
     if ((session & 0xffff000000000000ull) == PHONE_SESSION_BASE) {
         pthread_mutex_lock(&g_feedback_mu);
         if (session == (PHONE_SESSION_BASE | g_phone_epoch)) phone_submit_locked(values, NO);
+        else if (rumble_drop_first(1)) LOG("游戏震动：手机马达会话 %#llx 已过期（当前代次 %llu），丢弃；本局只报一次", (unsigned long long)session, (unsigned long long)g_phone_epoch);
         pthread_mutex_unlock(&g_feedback_mu); return;
     }
     pthread_mutex_lock(&g_feedback_mu);
@@ -773,6 +812,10 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64
             { values[1].low_amp, values[1].low_hz, values[1].high_amp, values[1].high_hz }
         };
         atomic_load(&g_ns2)->send_pair_lease(pair, 1000);
+    } else if (rumble_drop_first(4)) {
+        LOG("游戏震动：会话 %#llx 不是手机马达 / 系统手柄 / NS2 Pro 任何一路（%s；有系统手柄 %d，生效来源是实体手柄 %d），丢弃；本局只报一次",
+            (unsigned long long)session, session == MOTION_ONLY_SESSION ? "只给体感的会话：没有能震的设备" : session ? "会话号对不上" : "会话 0",
+            (int)g_system_present, s2a_pad_has_controller());
     }
     pthread_mutex_unlock(&g_feedback_mu);
 }
@@ -796,6 +839,9 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble(uint64_t se
         }
     } else if (!g_system_present && s2a_pad_has_controller() && atomic_load(&g_adapter_enabled) && session && session == atomic_load(&g_feedback_session) && atomic_load(&g_ble_ready))
         atomic_load(&g_ns2)->send_lease(side, low_amp, low_hz, high_amp, high_hz, 1000);
+    else if (rumble_drop_first(4))
+        LOG("游戏震动：会话 %#llx 不是手机马达 / 系统手柄 / NS2 Pro 任何一路（单侧提交；有系统手柄 %d，生效来源是实体手柄 %d），丢弃；本局只报一次",
+            (unsigned long long)session, (int)g_system_present, s2a_pad_has_controller());
     pthread_mutex_unlock(&g_feedback_mu);
 }
 // 设置页改了开关或强度：立即生效。关掉时三路马上停，不等游戏下一次提交

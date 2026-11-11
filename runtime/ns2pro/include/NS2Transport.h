@@ -37,6 +37,11 @@ void ns2_joycon_sideways(ns2_kind kind, int side_buttons, ns2_state *state);
 void ns2_joycon_sideways_motion(ns2_kind kind, ns2_motion *motion);
 // Joy-Con 2 左右拼成一对（竖握）：输入是两只各自已校准、未转横握的状态；按键取并集，左摇杆取左只、右摇杆取右只，不转向；NULL 当全 0
 void ns2_joycon_pair_state(const ns2_state *left, const ns2_state *right, ns2_state *out);
+// 扫描策略（纯函数，NS2Transport.m 的 NS2Bridge 调）：
+//   只有一条链路时还要不要扫另一侧——那一只是 Joy-Con 且没失败就要（还在连也算：重连记住的那只时它可能没开机，直连要等 30 秒超时）
+int ns2_scan_wants_other_side(ns2_kind only, int only_ready, int only_failed);
+//   一条链路失败时停不停扫描——Pro 停（同改前）；Joy-Con 不停，另一侧可能正在扫描窗口里等着被找到
+int ns2_link_failure_stops_scan(ns2_kind failed);
 // 复制最近运动样本，超过 250 ms 或断开后清空；不产生设备访问。
 // Copy the latest motion sample, clearing it after 250 ms or disconnection without accessing hardware.
 void ns2_get_motion(ns2_motion *out);

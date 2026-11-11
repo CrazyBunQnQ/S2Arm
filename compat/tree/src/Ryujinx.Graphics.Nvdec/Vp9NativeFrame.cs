@@ -10,7 +10,7 @@ namespace Ryujinx.Graphics.Nvdec
     struct Vp9NativeInput
     {
         public int LastWidth, LastHeight, GoldenWidth, GoldenHeight, AltWidth, AltHeight, Width, Height;
-        public bool KeyFrame, IntraOnly;
+        public bool KeyFrame, IntraOnly, ErrorResilient;
         public int SignBias1, SignBias2, SignBias3;
         public int FilterLevel, Sharpness, BaseQIndex, YDcDeltaQ, UvDcDeltaQ, UvAcDeltaQ;
         public bool Lossless;
@@ -225,10 +225,41 @@ namespace Ryujinx.Graphics.Nvdec
             }
         }
 
-        public const int MaxHeaderBytes = 64;
+        // Uncompressed header + up to a full compressed header (Vp9CompressedHeader.MaxBytes) before tiles.
+        public const int MaxHeaderBytes = 64 + Vp9CompressedHeader.MaxBytes;
 
         // Writes header + 1 stand-in byte + tiles into dst; returns the length. target: -1 on key frames.
         public static int Write(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, ReadOnlySpan<byte> tiles, Span<byte> dst)
+        {
+            int n = WriteUncompressed(in p, refIdx, target, 1, false, dst);
+            dst[n++] = 0;                      // stand-in compressed header
+            tiles.CopyTo(dst[n..]);
+            n += tiles.Length;
+            return n;
+        }
+
+        // Writes header + the real compressed header (defaults -> supplied prob deltas) + tiles; the caller
+        // must have cleared the job through Vp9CompressedHeader.Check. Returns the length.
+        public static int Write(
+            in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target,
+            ReadOnlySpan<byte> probs, ReadOnlySpan<byte> defaults, ReadOnlySpan<byte> tiles, Span<byte> dst)
+        {
+            Span<byte> compressed = stackalloc byte[Vp9CompressedHeader.MaxBytes];
+            int nCompressed = Vp9CompressedHeader.Write(in p, probs, defaults, compressed);
+
+            int n = WriteUncompressed(in p, refIdx, target, nCompressed, true, dst);
+            compressed[..nCompressed].CopyTo(dst[n..]);
+            tiles.CopyTo(dst[(n + nCompressed)..]);
+            n += nCompressed + tiles.Length;
+            if ((dst[n - 1] & 0xe0) == 0xc0)
+                dst[n++] = 0;                  // a packet ending in a marker byte would be split as a superframe
+            return n;
+        }
+
+        // mc: emit the byte-level fixups a real decoder requires (interp literal remap, tail-bit mask,
+        // marker-pattern pad byte). The libvpx backend consumed the pre-fixup byte shape since this file
+        // existed — its Write must keep producing those exact bytes (mc=false).
+        private static int WriteUncompressed(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, int headerSize, bool mc, Span<byte> dst)
         {
             bool key = p.KeyFrame;
             bool intraOnly = !key && p.IntraOnly;
@@ -312,12 +343,11 @@ namespace Ryujinx.Graphics.Nvdec
 
             b.Put(p.Log2TileRows != 0 ? 1u : 0u, 1);
             if (p.Log2TileRows != 0) b.Put(p.Log2TileRows == 2 ? 1u : 0u, 1);
-            b.Put(1, 16);                      // header_size_in_bytes
+            b.Put((uint)headerSize, 16);       // header_size_in_bytes
 
             int n = (b.Bit + 7) >> 3;
-            dst[n++] = 0;                      // stand-in compressed header
-            tiles.CopyTo(dst[n..]);
-            return n + tiles.Length;
+            if (mc && (b.Bit & 7) != 0) dst[n - 1] &= (byte)(0xff << (8 - (b.Bit & 7)));
+            return n;
         }
     }
 }

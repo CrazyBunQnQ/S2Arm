@@ -39,10 +39,10 @@ S2ASettingsRuntime *s2a_settings_runtime(void) { return g_runtime; }
 @end
 
 static NSArray *toggleKeys(void) {
-    return @[@"S2ANS2ProAdapterEnabled", @"S2APhoneGyro", @"S2APhoneHaptics", @"S2ADiagExportOnOpen", @"S2ADevHUD", @"MetalHUDForceEnabled", @"S2AWidescreen", @"S2AFps60", @"S2A.touchHud", @"S2ADockedMode"];
+    return @[@"S2ANS2ProAdapterEnabled", @"S2APhoneGyro", @"S2APhoneHaptics", @"S2ADiagExportOnOpen", @"S2ADevHUD", @"MetalHUDForceEnabled", @"S2AWidescreen", @"S2AFps60", @"S2A.touchHud", @"S2ADockedMode", @"S2ADiagRunNext"];
 }
 static NSArray *toggleTitles(void) {
-    return @[S2AL(@"vpad.menu.ns2pro"), S2AL(@"vpad.menu.gyro"), S2AL(@"settings.toggle.phoneHaptics"), S2AL(@"settings.toggle.diagOnOpen"), S2AL(@"settings.toggle.devHud"), S2AL(@"settings.toggle.metalHud"), S2AL(@"cpatch.group.widescreen"), S2AL(@"cpatch.group.fps"), S2AL(@"settings.toggle.touchHud"), S2AL(@"settings.toggle.docked")];
+    return @[S2AL(@"vpad.menu.ns2pro"), S2AL(@"vpad.menu.gyro"), S2AL(@"settings.toggle.phoneHaptics"), S2AL(@"settings.toggle.diagOnOpen"), S2AL(@"settings.toggle.devHud"), S2AL(@"settings.toggle.metalHud"), S2AL(@"cpatch.group.widescreen"), S2AL(@"cpatch.group.fps"), S2AL(@"settings.toggle.touchHud"), S2AL(@"settings.toggle.docked"), S2AL(@"settings.toggle.diagRun")];
 }
 static UILabel *textLabel(UIFontTextStyle style) {
     UILabel *label = [UILabel new]; label.font = [UIFont preferredFontForTextStyle:style];
@@ -225,10 +225,11 @@ static UILabel *textLabel(UIFontTextStyle style) {
     control.on = saved ? [saved boolValue] : (index == 1 || index == 2 || index == 6 || index == 7);
     control.accessibilityLabel = toggleTitles()[index]; control.accessibilityIdentifier = [@"settings." stringByAppendingString:key];
     // 主机模式（#352，维护者 11-09：手机缺省掌机，玩家可自己开）：标题下一行写明代价——更耗电换画质，手机上不建议开
-    if ([key isEqualToString:@"S2ADockedMode"]) {
+    // 诊断局（#438）同样在标题下写一行：怎么用、只管下一局、会变慢
+    if ([key isEqualToString:@"S2ADockedMode"] || [key isEqualToString:@"S2ADiagRunNext"]) {
         UITableViewCell *sub = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         sub.textLabel.text = cell.textLabel.text; sub.textLabel.font = cell.textLabel.font; sub.textLabel.adjustsFontForContentSizeCategory = YES; sub.textLabel.numberOfLines = 0;
-        sub.detailTextLabel.text = S2AL(@"settings.docked.note"); sub.detailTextLabel.numberOfLines = 0; sub.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+        sub.detailTextLabel.text = [key isEqualToString:@"S2ADiagRunNext"] ? S2AL(@"settings.diagRun.note") : S2AL(@"settings.docked.note"); sub.detailTextLabel.numberOfLines = 0; sub.detailTextLabel.textColor = UIColor.secondaryLabelColor;
         sub.detailTextLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]; sub.detailTextLabel.adjustsFontForContentSizeCategory = YES;
         sub.selectionStyle = UITableViewCellSelectionStyleNone; cell = sub;
     }
@@ -266,7 +267,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (NSInteger)rowsForGroup:(NSInteger)group {
     if (group == 4 || group == 5) return 1;
-    return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @3, @2][group] integerValue];
+    return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @4, @2][group] integerValue];   // 诊断组第 4 行：诊断局
 }
 - (UITableViewCell *)cellForGroup:(NSInteger)group row:(NSInteger)row {
     __weak S2ASettingsController *weakSelf = self;
@@ -305,6 +306,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
     }
     if (group == 2 && row == 0) { UITableViewCell *cell = [self baseCell:S2AL(@"diag.export")]; cell.textLabel.textColor = self.view.tintColor; cell.accessibilityIdentifier = @"settings.export"; return cell; }
     if (group == 2 && row == 2) return [self toggleCell:8];
+    if (group == 2 && row == 3) return [self toggleCell:10];
     return [self toggleCell:group == 1 ? row - 1 : group == 2 ? 3 : row + 4];
 }
 - (void)selectGroup:(NSInteger)group row:(NSInteger)row {

@@ -130,8 +130,33 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
             ? (pkg.Display.Length > 0 ? pkg.Display : "v" + pkg.Version) : null;
 };
 
+/// <summary>catalog phoneUpdates 的一项（pack/jobs/install.py phone_updates）：按本机装机记录，这台手机上的 S2Arm 壳比本版旧。
+/// Games = 记录里的各款，Stale = 新壳认不得、要按新版重新出包的款（都是 {gameId, name}）。</summary>
+public sealed record PhoneUpdate(string Device, string Name, string FromShell, string ToShell,
+    IReadOnlyList<PhoneUpdate.Game> Games, IReadOnlyList<PhoneUpdate.Game> Stale)
+{
+    public sealed record Game(string Id, string Name);
+
+    /// <summary>缺字段 / 不是数组 → 空列表（旧后端没有这个字段）；没有 device 的项跳过。</summary>
+    public static IReadOnlyList<PhoneUpdate> ParseList(JsonElement result)
+    {
+        if (!result.TryGetProperty("phoneUpdates", out var list) || list.ValueKind != JsonValueKind.Array) return [];
+        static string S(JsonElement e, string key) => e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        static IReadOnlyList<Game> Games(JsonElement e, string key) =>
+            e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Array
+                ? v.EnumerateArray().Where(g => g.ValueKind == JsonValueKind.Object && S(g, "gameId").Length > 0)
+                    .Select(g => new Game(S(g, "gameId"), S(g, "name").Length > 0 ? S(g, "name") : S(g, "gameId"))).ToArray()
+                : [];
+        return list.EnumerateArray().Where(u => u.ValueKind == JsonValueKind.Object && S(u, "device").Length > 0)
+            .Select(u => new PhoneUpdate(S(u, "device"), S(u, "name"), S(u, "fromShell"), S(u, "toShell"), Games(u, "games"), Games(u, "stale"))).ToArray();
+    }
+}
+
 public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysReady, string KeysMessage)
 {
+    /// <summary>壳比本版旧的手机（游戏库顶栏「更新 iPhone 上的 S2Arm」按钮）；旧后端没有这个字段时为空。</summary>
+    public IReadOnlyList<PhoneUpdate> PhoneUpdates { get; init; } = [];
+
     public static LibraryCatalog Parse(JsonElement result)
     {
         try
@@ -180,7 +205,7 @@ public sealed record LibraryCatalog(IReadOnlyList<LibraryGame> Games, bool KeysR
             }
             var keys = result.GetProperty("keys");
             return new(games.AsReadOnly(), keys.GetProperty("ready").GetBoolean(),
-                LibraryJobResult.Text(keys, "message", true));
+                LibraryJobResult.Text(keys, "message", true)) { PhoneUpdates = PhoneUpdate.ParseList(result) };
         }
         catch (Exception error) when (error is InvalidOperationException or KeyNotFoundException)
         {
@@ -252,10 +277,20 @@ public sealed record StorageOverview(IReadOnlyList<StorageOverview.Location> Loc
 }
 
 /// <summary>One storage location (locations job, pack/jobs/library.py location_rows): one entry of the export page dropdown.</summary>
-public sealed record StorageLocation(string Id, string Path, string Volume, bool Connected, long? FreeBytes, bool IsDefault);
+/// <summary>Slack：这块盘会让出包多占空间 / 可能失败的原因（#444，后端 libloc.slack_reason；只提示不拦）；null 没问题。</summary>
+public sealed record StorageLocation(string Id, string Path, string Volume, bool Connected, long? FreeBytes, bool IsDefault, LocationSlack? Slack = null);
+
+/// <summary>Reason：cluster（分配单元 ≥ 64 KB，小文件每个占满一簇）/ format（不是 NTFS、ReFS）；ClusterBytes 提示里写「每个小文件至少占 N」。</summary>
+public sealed record LocationSlack(string Reason, long ClusterBytes)
+{
+    public static LocationSlack? Parse(JsonElement e) =>
+        e.TryGetProperty("slackWarning", out var w) && w.ValueKind == JsonValueKind.True && e.TryGetProperty("slackReason", out var r) && r.ValueKind == JsonValueKind.String
+            ? new(r.GetString()!, e.TryGetProperty("clusterBytes", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt64() : 0) : null;
+}
 
 /// <summary>Result of the locations job: every storage location and the id of the one used last.</summary>
-public sealed record StorageLocations(IReadOnlyList<StorageLocation> Rows, string Last)
+/// <summary>Probed / ProbeSlack：请求带 probe（「选择其他文件夹…」选的路径）时为 true，ProbeSlack 是这个路径的提示原因（null = 没问题）。</summary>
+public sealed record StorageLocations(IReadOnlyList<StorageLocation> Rows, string Last, bool Probed = false, LocationSlack? ProbeSlack = null)
 {
     public static StorageLocations Parse(JsonElement result)
     {
@@ -266,8 +301,11 @@ public sealed record StorageLocations(IReadOnlyList<StorageLocation> Rows, strin
                 LibraryJobResult.Text(r, "id"), LibraryJobResult.Text(r, "path"), LibraryJobResult.Text(r, "volume", true),
                 r.GetProperty("connected").GetBoolean(),
                 r.TryGetProperty("freeBytes", out var free) && free.ValueKind == JsonValueKind.Number ? free.GetInt64() : null,
-                r.TryGetProperty("default", out var d) && d.ValueKind == JsonValueKind.True)).ToArray();
-            return new(rows, result.TryGetProperty("last", out var last) && last.ValueKind == JsonValueKind.String ? last.GetString()! : "");
+                r.TryGetProperty("default", out var d) && d.ValueKind == JsonValueKind.True,
+                LocationSlack.Parse(r))).ToArray();
+            var probed = result.TryGetProperty("probe", out var p) && p.ValueKind == JsonValueKind.Object;
+            return new(rows, result.TryGetProperty("last", out var last) && last.ValueKind == JsonValueKind.String ? last.GetString()! : "",
+                probed, probed ? LocationSlack.Parse(p) : null);
         }
         catch (Exception error) when (error is InvalidOperationException or KeyNotFoundException or FormatException)
         { throw new LibraryProtocolException("Invalid storage locations.", error); }

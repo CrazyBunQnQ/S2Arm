@@ -19,15 +19,32 @@ namespace Ryujinx.Graphics.Nvdec
     sealed class Vp9NativePath : IDisposable
     {
         private const int MaxErrors = 3;
+        private const int MaxMidFallbacks = 3;   // mid-stream fallbacks tolerated per decode context; then native is disabled outright
+
+        // Guest MV freshness: a backend that cannot produce the NVDEC MV field (ProducesGuestMetadata=false)
+        // leaves the guest MV write buffer untouched on Decoded, so the read buffer a later managed job would
+        // consume is stale. Stale clears when a managed decode writes real MVs again, or a key frame job passes
+        // through (keyframes reset the field — a use_prev job cannot directly follow one anyway). The caller
+        // refuses to run a managed job with use_prev_frame_mvs while stale.
+        internal struct Vp9GuestMvState
+        {
+            public bool Stale;
+            public void NoteKeyFrame() => Stale = false;
+            public void NoteNativeDecoded(bool produced) { if (!produced) Stale = true; }
+            public void NoteManagedDecoded() => Stale = false;
+        }
 
         private readonly IVp9NativeBackend _backend;
         private readonly Vp9SlotMap _slots = new();
         private readonly VpxSurface _surface = new(0, 0);
         private readonly HashSet<string> _loggedReasons = [];
         private byte[] _frame = new byte[1 << 20];
+        private byte[] _defaults;
         private readonly byte[] _counts = new byte[VpxVp9Backend.CountsSize];
+        private Vp9GuestMvState _mvState;
         private bool _active;
         private int _errors;
+        private int _midFallbacks;
         private bool _loggedFirst;
 
         public bool Disabled { get; private set; }
@@ -43,6 +60,18 @@ namespace Ryujinx.Graphics.Nvdec
             }
         }
 
+        // Spec-default probs (key-frame init) as the 3087-byte blob — the base every compressed-header
+        // delta is emitted against. Lazily built once; only read when the backend NeedsCompressedHeader.
+        private ReadOnlySpan<byte> Defaults()
+        {
+            if (_defaults == null)
+            {
+                Vp9EntropyProbs fc = Vp9.Decoder.DefaultProbs();
+                _defaults = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref fc, 1)).ToArray();
+            }
+            return _defaults;
+        }
+
         public void Deactivate()
         {
             _active = false;
@@ -51,7 +80,27 @@ namespace Ryujinx.Graphics.Nvdec
 
         private void Fallback(string reason)
         {
+            // A fallback while a native segment was running strands the guest MV/count state the managed
+            // decoder would consume — but only on a backend that produces no guest metadata (MC). libvpx
+            // fills real MVs/counts, so its managed handoff stays exact and must keep the old
+            // "off until the next key frame" behavior — the disable bound below would otherwise
+            // permanently kill native decode on iOS/Mac after a few representable-gap events.
+            bool midStream = _active && !_backend.ProducesGuestMetadata;
+
             Deactivate();
+            _backend.NoteFallback(reason);
+
+            if (midStream)
+            {
+                _midFallbacks++;
+                Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码中途回退 {_midFallbacks}/{MaxMidFallbacks}：{reason}");
+
+                if (_midFallbacks >= MaxMidFallbacks)
+                {
+                    Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码同一上下文累计 {MaxMidFallbacks} 次中途回退，本解码上下文停用原生后端，之后各 GOP 从头走托管解码器");
+                    Disabled = true;
+                }
+            }
 
             if (_loggedReasons.Add(reason))
             {
@@ -69,6 +118,7 @@ namespace Ryujinx.Graphics.Nvdec
                 Width = p.CurrentFrameSize.Width, Height = p.CurrentFrameSize.Height,
                 KeyFrame = p.Flags.HasFlag(FrameFlags.IsKeyFrame),
                 IntraOnly = p.Flags.HasFlag(FrameFlags.IntraOnly),
+                ErrorResilient = p.Flags.HasFlag(FrameFlags.ErrorResilientMode),
                 SignBias1 = p.RefFrameSignBias[1], SignBias2 = p.RefFrameSignBias[2], SignBias3 = p.RefFrameSignBias[3],
                 FilterLevel = p.FirstLevel, Sharpness = p.SharpnessLevel, BaseQIndex = p.BaseQIndex,
                 YDcDeltaQ = p.YDcDeltaQ, UvDcDeltaQ = p.UvDcDeltaQ, UvAcDeltaQ = p.UvAcDeltaQ,
@@ -98,6 +148,11 @@ namespace Ryujinx.Graphics.Nvdec
 
             Vp9NativeInput input = Input(ref pictureInfo, ref state);
 
+            if (input.KeyFrame)
+            {
+                _mvState.NoteKeyFrame();
+            }
+
             if (!_active)
             {
                 if (!input.KeyFrame)
@@ -114,6 +169,16 @@ namespace Ryujinx.Graphics.Nvdec
             int target = -1;
             reason ??= _slots.Resolve(input, refIdx, out target);
 
+            ReadOnlySpan<byte> probs = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info.Entropy, 1));
+
+            // A backend without an out-of-band probs channel (NeedsCompressedHeader) gets the real compressed
+            // header — defaults -> supplied deltas — but only sections with update slots are writable; the rest
+            // must already sit at the ctx defaults or the job falls to the managed decoder.
+            if (reason == null && _backend.NeedsCompressedHeader)
+            {
+                reason = Vp9CompressedHeader.Check(input, probs, Defaults());
+            }
+
             if (reason != null)
             {
                 Fallback(reason);
@@ -125,7 +190,9 @@ namespace Ryujinx.Graphics.Nvdec
                 _frame = new byte[(tiles.Length + Vp9NativeHeader.MaxHeaderBytes) * 2];
             }
 
-            int frameLength = Vp9NativeHeader.Write(input, refIdx, target, tiles, _frame);
+            int frameLength = _backend.NeedsCompressedHeader
+                ? Vp9NativeHeader.Write(input, refIdx, target, probs, Defaults(), tiles, _frame)
+                : Vp9NativeHeader.Write(input, refIdx, target, tiles, _frame);
 
             int miCols = (input.Width + 7) >> 3;
             int miRows = (input.Height + 7) >> 3;
@@ -140,12 +207,14 @@ namespace Ryujinx.Graphics.Nvdec
                 CompVarRef0 = pictureInfo.CompVarRef[0],
                 CompVarRef1 = pictureInfo.CompVarRef[1],
                 UsePrevFrameMvs = info.UsePrevInFindMvRefs ? 1 : 0,
+                Width = input.Width,
+                Height = input.Height,
+                ShowFrame = input.IntraOnly ? 0 : 1,   // 与 Vp9NativeHeader.Write 的 show_frame 位同源
             };
 
             ReadOnlySpan<byte> prevMvs = info.UsePrevInFindMvRefs
                 ? rm.MemoryManager.DeviceGetSpan(state.Vp9SetColMvReadBufOffset, mvBytes)
                 : ReadOnlySpan<byte>.Empty;
-            ReadOnlySpan<byte> probs = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info.Entropy, 1));
 
             Vp9NativeResult result;
             Vp9NativePicture picture;
@@ -174,6 +243,7 @@ namespace Ryujinx.Graphics.Nvdec
                 return false;
             }
 
+            _mvState.NoteNativeDecoded(_backend.ProducesGuestMetadata);
             _slots.Commit(input, input.KeyFrame ? -1 : target);
             _surface.Attach((byte*)picture.Y, (byte*)picture.U, (byte*)picture.V, picture.YStride, picture.UvStride, picture.Width, picture.Height);
             SurfaceWriter.Write(rm.MemoryManager, _surface, input.OutLuma, input.OutChroma);
@@ -188,6 +258,13 @@ namespace Ryujinx.Graphics.Nvdec
 
             return true;
         }
+
+        // True when the guest MV read buffer does not hold the previous frame's real MV field: a backend that
+        // produces no guest metadata decoded since the last managed decode or key frame. The caller must not run
+        // a managed job with use_prev_frame_mvs while this holds — it would consume stale values.
+        public bool GuestMvStale => _mvState.Stale;
+
+        public void NoteManagedDecoded() => _mvState.NoteManagedDecoded();
 
         public void Dispose()
         {

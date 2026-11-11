@@ -164,6 +164,33 @@ SetW(pack, "devCert", JsonDocument.Parse("""
 """).RootElement.Clone());
 SaveP("win_11_export_sign_devcert", () => Navigate(pack, "build"));
 
+// 批量出包清单页（BatchPage.cs）：出包前（勾选、Mac 置灰、缺密钥、缺文件、认不出）；出完有成有败（磁盘满暂停、释放空间、重试、装到 iPhone、上次被打断）。
+//   清单由 OpenBatch 按游戏库生成；出完的状态直接放 batch.py 形状的结果（不跑 batch.py）
+pack.Height = 900;
+static LibraryGame BatchMock(string id, string name, string format, IReadOnlyList<string>? missing = null) => MockGame(true) with
+{
+    Id = id, Name = name, Missing = missing ?? [], Packages = [new("base", id, 0, "v1.0.0", 4_000_000_000L, format)]
+};
+SetW(pack, "catalog", new LibraryCatalog([
+    BatchMock("0100AAAA00000000", "星海远征", "extract"), BatchMock("0100BBBB00000000", "Pixel Garden", "extract"),
+    BatchMock("0100CCCC00000000", "雪原小镇", "nsp"), BatchMock("0100DDDD00000000", "Clockwork Isles", "extract", ["本体"]),
+    BatchMock("0100EEEE00000000", "Harbor Lights", "extract")], false, ""));
+SetW(pack, "connectedFolder", "/tmp/s2arm-library");
+SetW(pack, "libraryId", "mock-lib-id");
+SetW(pack, "batchState", null);
+CallW(pack, "OpenBatch", new List<string> { "0100AAAA00000000", "0100BBBB00000000", "0100CCCC00000000", "0100DDDD00000000", "0100EEEE00000000" },
+    new List<ImportOutcome.Unrecognized> { new("readme.txt", "不是 NSP、XCI 或解包好的游戏文件夹。", "input_type_unsupported") });
+SaveP("win_12_batch_draft", () => { });
+SetW(pack, "batchState", BatchClient.Read(JsonDocument.Parse("""
+{"batch":{"schema":1,"location":null,"paused":"disk_full","items":[
+ {"gameId":"0100AAAA00000000","name":"星海远征","platforms":["iphone"],"results":{"iphone":{"state":"completed","output":"/tmp/a.ipa"}}},
+ {"gameId":"0100BBBB00000000","name":"Pixel Garden","platforms":["iphone"],"results":{"iphone":{"state":"failed","message":"游戏文件读不出来，可能已损坏。","code":"content_unreadable"}}},
+ {"gameId":"0100EEEE00000000","name":"Harbor Lights","platforms":["iphone"],"results":{"iphone":{"state":"failed","message":"磁盘空间不足，无法继续出包。","code":"disk_full"}}},
+ {"gameId":"0100CCCC00000000","name":"雪原小镇","platforms":["iphone"],"results":{"iphone":{"state":"pending","interrupted":true}}}]},
+ "next":null,"summary":{"total":4,"completed":1,"failed":2,"cancelled":0,"pending":1,"done":false}}
+""").RootElement.Clone()).State);
+SaveP("win_13_batch_done_mixed", () => Navigate(pack, "batch"));
+
 pack.Close();
 Dispatcher.UIThread.RunJobs();
 Console.WriteLine("done.");

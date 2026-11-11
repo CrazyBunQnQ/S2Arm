@@ -66,7 +66,7 @@ static int cmp_u64(const void *a, const void *b) { uint64_t x = *(const uint64_t
 // 60 帧降档原因（runtime/src/fps.c：热状态危急 / 低电量模式时自动按关生效）：弱定义缺省 0，fps.c 的强定义覆盖（单测只链本文件时用缺省）
 __attribute__((weak)) int s2a_fps_cap_reason(void) { return 0; }
 __attribute__((weak)) int s2a_ui_zh(void) { return 1; }   // 界面语言（s2a_ui_text.h）：iOS ios/app.m、Mac macos/front_mac.m 强定义；别的平台 / 只链本文件的单测按中文
-static const char *cap_note(void) { int r = s2a_fps_cap_reason(); return r == 1 ? "　60 帧降档：热" : r == 2 ? "　60 帧降档：低电量" : r == 3 ? "　60 帧：同局 A/B 测原帧率" : ""; }
+static const char *cap_note(void) { int r = s2a_fps_cap_reason(); return r == 1 ? "　60 帧降档：热" : r == 2 ? "　60 帧降档：低电量" : r == 3 ? "　60 帧：同局 A/B 测原帧率" : r == 4 ? "　60 帧：档位梯子压回原帧率" : ""; }
 static void line_fps(char *o, size_t n) {
     uint64_t end = atomic_load_explicit(&g_fn, memory_order_acquire), now = mono_ns();
     static uint64_t itv[HR]; int k = 0; uint64_t f1 = 0, prev = 0;

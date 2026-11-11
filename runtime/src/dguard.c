@@ -46,7 +46,7 @@ static int load(uint64_t *pid, char *pack, size_t pn, char *host, size_t hn, cha
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0; if (!line[0]) continue;
         if (line[0] == '?') { dropped++; continue; }   // 待定行：那局没留下失败证据
-        if (n < max) snprintf(rows[n], 48, "%s", line); else { memmove(rows, rows + 1, (size_t)(max - 1) * 48); snprintf(rows[max - 1], 48, "%s", line); }
+        if (n < max) snprintf(rows[n], 48, "%.47s", line); else { memmove(rows, rows + 1, (size_t)(max - 1) * 48); snprintf(rows[max - 1], 48, "%.47s", line); }   // 显式精度：与按 48 字节截断逐字节相同，gcc -Wformat-truncation 不再报
         if (n < max) n++;
     }
     fclose(f);
@@ -153,7 +153,7 @@ size_t s2a_dguard_diag(char *out, size_t n, const char *build_id, const char *ch
     size_t l = sizeof model; if (sysctlbyname(TARGET_OS_IPHONE ? "hw.machine" : "hw.model", model, &l, NULL, 0)) snprintf(model, sizeof model, "?");   // Mac：hw.machine 是 arm64，型号在 hw.model
     l = sizeof osv; if (sysctlbyname("kern.osproductversion", osv, &l, NULL, 0)) snprintf(osv, sizeof osv, "?");
 #else
-    struct utsname u; if (!uname(&u)) { snprintf(model, sizeof model, "%s", u.machine); snprintf(osv, sizeof osv, "%s %s", u.sysname, u.release); }
+    struct utsname u; if (!uname(&u)) { snprintf(model, sizeof model, "%.63s", u.machine); snprintf(osv, sizeof osv, "%.31s %.31s", u.sysname, u.release); }
 #endif
     pthread_mutex_lock(&g_mu);
     uint64_t pid = g_pid; char pack[24], host[48]; snprintf(pack, sizeof pack, "%s", g_pack); snprintf(host, sizeof host, "%s", g_host);

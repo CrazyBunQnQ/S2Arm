@@ -14,7 +14,12 @@ import android.view.View;
  */
 @android.annotation.SuppressLint({"ViewConstructor", "ClickableViewAccessibility"})
 final class TouchPadView extends View {
-    interface Listener { void onTouchPad(TouchPad pad); }
+    interface Listener {
+        void onTouchPad(TouchPad pad);
+        /** Exactly four fingers held for MENU_HOLD_MS (the iOS gesture): the in-game touch menu. */
+        default void onTouchMenu() { }
+    }
+    static final long MENU_HOLD_MS = 1500;
 
     private final TouchPad pad = new TouchPad();
     private final Listener listener;
@@ -26,6 +31,15 @@ final class TouchPadView extends View {
     private final GameTouch gameTouch = new GameTouch(this::publishGameTouch);
     private boolean controlsVisible = true;
     private boolean trace;
+    private boolean editing;
+    private TouchPad.Control dragging;
+    private int dragPointer = -1;
+    private float dragX, dragY;
+    interface EditDragListener { void onEditDrag(boolean dragging); }
+    private EditDragListener editDrag = dragging -> { };
+    /** The editor bar fades while a control is dragged, so a control can pass under it. */
+    void setEditDragListener(EditDragListener listener) { editDrag = listener; }
+    private final Runnable menuHold = this::openMenu;
     void setTrace(boolean enabled) { trace = enabled; TouchInputBridge.touchTrace(enabled); }
 
     boolean gameTouchEnabled() { return gameTouch.enabled(); }
@@ -108,6 +122,29 @@ final class TouchPadView extends View {
 
     TouchPad pad() { return pad; }
 
+    /** Use a player layout (null = built-in) and lay it out now. */
+    void setLayout(TouchLayout layout) {
+        pad.setLayout(layout);
+        relayout();
+    }
+
+    boolean editing() { return editing; }
+
+    /** Drag mode: every control can be moved; nothing reaches the game or the pad's input state. */
+    void beginEditing() {
+        release();
+        editing = true;
+        invalidate();
+    }
+
+    /** Leave drag mode; the caller saves pad().editedLayout(...) first, or drops the drags with setLayout. */
+    void endEditing() {
+        editing = false;
+        dragging = null;
+        dragPointer = -1;
+        relayout();
+    }
+
     /** System bars / cutouts: keep the controls out from under them. */
     void setInsets(int left, int top, int right, int bottom) {
         insetLeft = left; insetTop = top; insetRight = right; insetBottom = bottom;
@@ -117,6 +154,8 @@ final class TouchPadView extends View {
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) { relayout(); }
 
     private void relayout() {
+        dragging = null;   // layout() rebuilds the controls; an editor drag restarts from the new places
+        dragPointer = -1;
         if (getWidth() == 0 || getHeight() == 0) return;
         pad.cancel();
         revokeGameViewport();
@@ -126,6 +165,8 @@ final class TouchPadView extends View {
     }
 
     @Override public boolean onTouchEvent(MotionEvent e) {
+        if (editing) return handleEditEvent(e);
+        watchMenuHold(e);
         try {
             return handleTouchEvent(e);
         } catch (IllegalArgumentException | IllegalStateException error) {
@@ -181,8 +222,55 @@ final class TouchPadView extends View {
         return true;
     }
 
+    private void openMenu() {
+        // The four fingers may be on the game (passthrough): lift them there before the menu opens.
+        release();
+        listener.onTouchMenu();
+    }
+
+    private void watchMenuHold(MotionEvent e) {
+        int action = e.getActionMasked();
+        int down = e.getPointerCount() - (action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_UP ? 1 : 0);
+        if (action == MotionEvent.ACTION_POINTER_DOWN && down == 4) postDelayed(menuHold, MENU_HOLD_MS);
+        else if (down != 4 || action == MotionEvent.ACTION_CANCEL) removeCallbacks(menuHold);
+    }
+
+    private boolean handleEditEvent(MotionEvent e) {
+        int index = e.getActionIndex();
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (dragging != null) break;   // one control at a time
+                dragging = pad.controlAt(e.getX(index), e.getY(index));
+                if (dragging == null) break;
+                dragPointer = e.getPointerId(index);
+                dragX = dragging.x - e.getX(index); dragY = dragging.y - e.getY(index);
+                editDrag.onEditDrag(true);
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                break;
+            case MotionEvent.ACTION_MOVE: {
+                int i = dragging == null ? -1 : e.findPointerIndex(dragPointer);
+                if (i >= 0) pad.moveControl(dragging, e.getX(i) + dragX, e.getY(i) + dragY);
+                break;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (e.getPointerId(index) == dragPointer) { dragging = null; dragPointer = -1; editDrag.onEditDrag(false); }
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                dragging = null; dragPointer = -1;
+                editDrag.onEditDrag(false);
+                break;
+            default:
+                break;
+        }
+        invalidate();
+        return true;
+    }
+
     /** Lifted fingers we never saw (focus loss, pause): release everything. */
     void release() {
+        removeCallbacks(menuHold);
         pad.cancel();
         gameTouch.cancel();
         lastButtons = 0;
@@ -191,11 +279,20 @@ final class TouchPadView extends View {
     }
 
     @Override protected void onDraw(Canvas canvas) {
-        if (!controlsVisible) return;
+        if (!controlsVisible && !editing) return;
+        if (editing) canvas.drawColor(0x66000000);   // the game dims; every control can be dragged
         for (TouchPad.Control c : pad.controls()) {
-            fill.setColor(c.pressed ? 0x66FFFFFF : 0x26FFFFFF);
-            canvas.drawCircle(c.x, c.y, c.radius, fill);
-            canvas.drawCircle(c.x, c.y, c.radius, ring);
+            fill.setColor(editing ? (c == dragging ? 0x8800C8FF : 0x40FFFFFF) : c.pressed ? 0x66FFFFFF : 0x26FFFFFF);
+            if (c.kind == TouchPad.BUTTON) {
+                // F01 key frame; a round key (corner == half side) draws the same disc as before.
+                canvas.drawRoundRect(c.x - c.halfWidth, c.y - c.halfHeight, c.x + c.halfWidth, c.y + c.halfHeight,
+                        c.corner, c.corner, fill);
+                canvas.drawRoundRect(c.x - c.halfWidth, c.y - c.halfHeight, c.x + c.halfWidth, c.y + c.halfHeight,
+                        c.corner, c.corner, ring);
+            } else {
+                canvas.drawCircle(c.x, c.y, c.radius, fill);
+                canvas.drawCircle(c.x, c.y, c.radius, ring);
+            }
             if (c.kind == TouchPad.STICK) {
                 fill.setColor(c.pressed ? 0xAAFFFFFF : 0x55FFFFFF);
                 canvas.drawCircle(c.x + c.knobX * c.radius, c.y + c.knobY * c.radius, c.radius * 0.45f, fill);
@@ -207,7 +304,7 @@ final class TouchPadView extends View {
                 canvas.drawText("◀", c.x - a, c.y + text.getTextSize() / 3, text);
                 canvas.drawText("▶", c.x + a, c.y + text.getTextSize() / 3, text);
             } else {
-                text.setTextSize(c.radius * 0.8f);
+                text.setTextSize(Math.min(c.halfWidth, c.halfHeight) * 0.8f);
                 canvas.drawText(c.label, c.x, c.y + text.getTextSize() / 3, text);
             }
         }

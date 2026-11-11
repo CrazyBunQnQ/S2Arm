@@ -203,9 +203,10 @@ void s2a_pad_face_set(int by_letter) { atomic_store(&g_face, by_letter ? 1 : 0);
 void s2a_pad_abxy_order(int kind, int by_letter, int out[4]) {
     // 系统 buttonA/B/X/Y 一律按物理方位上报（A 南、B 东、X 西、Y 北），只有任天堂手柄按键帽字母上报（印 A 的右键 = buttonA）。
     //   任天堂：字母就在任天堂的位置，两种口径一样；Xbox：按字母 = 系统 A/B/X/Y 直接对 Switch A/B/X/Y，按位置 = 东/南/北/西；
-    //   PlayStation（×○□△ 没有字母）与其他手柄：只有位置口径（Switch A 在东 = 系统 B，即 PS 的 ○）
+    //   PlayStation（×○□△ 没有字母）按字母时与 Xbox 同位置对应：× = A（确认）、○ = B、□ = X、△ = Y（11-10 维护者：自动识别 PS 手柄、不用玩家设；#466），
+    //   玩家选「按位置」回到 Switch 位置（○ = A）；其他手柄（认不出类型）只有位置口径
     static const int position[4] = {1, 0, 3, 2}, letter[4] = {0, 1, 2, 3};
-    int same = kind == S2A_PAD_KIND_NINTENDO || (kind == S2A_PAD_KIND_XBOX && by_letter);
+    int same = kind == S2A_PAD_KIND_NINTENDO || ((kind == S2A_PAD_KIND_XBOX || kind == S2A_PAD_KIND_PLAYSTATION) && by_letter);
     memcpy(out, same ? letter : position, sizeof letter);
 }
 void s2a_pad_stick(float x, float y, int32_t axes[2]) {

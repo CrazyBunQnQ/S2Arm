@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+index d382858fa589bb96e3cc59bd6697834ce05b7773..6afc7cf243712cdab8a3776d23b9cdcbd04c4d98 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+@@ -76,7 +76,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 {
+                     Operand phiSource = phi.GetSource(srcIndex);
+ 
+-                    if (phiSource.AsgOp is not PhiNode && !IsBindlessAccessAllowed(phiSource))
++                    if (phiSource.AsgOp is not PhiNode && !IsBindlessAccessAllowed(phiSource) &&
++                        !(gpuAccessor.QueryBindlessPhiSeeThrough() && IsGuardedTableHandle(bindlessHandle)))
+                     {
+                         return false;
+                     }
+@@ -146,6 +147,34 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return true;
+         }
+ 
++        // S2A（直连，#82 八方旅人0 落叶）：守卫下拼成的句柄（@P R = c[2][t] | c[2][s]）与读处的守卫对不上时，寄存器在读不执行的路径上还装着别的值（坐标、浮点中间量），
++        // phi 汇合后既不是同一个句柄也不全来自常量缓冲。只要汇合的值里有 c[2] 分离采样器表（IsSeparateSamplerWord）拼出的句柄，就按运行时句柄走回退数组：
++        // 读执行的路径上值必是拼好的句柄，其余输入只出现在读不执行的路径上。上游原样是把读整个删掉、结果当 0（落叶的风摆掩码读成 0，预深度与基础通道位置不一致，深度 EQUAL 落空成黑块）
++        private static bool IsGuardedTableHandle(Operand handle)
++        {
++            List<Operand> leaves = new();
++            CollectLeaves(handle, leaves);
++
++            foreach (Operand leaf in leaves)
++            {
++                if (leaf.AsgOp is not Operation op || op.Inst != Instruction.BitwiseOr)
++                {
++                    continue;
++                }
++
++                List<Operand> words = new();
++                CollectLeaves(op.GetSource(0), words);
++                CollectLeaves(op.GetSource(1), words);
++
++                if (words.Exists(IsSeparateSamplerWord))
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
+         private static bool IsBindlessAccessAllowed(Operand bindlessHandle)
+         {
+             if (bindlessHandle.Type == OperandType.ConstantBuffer)

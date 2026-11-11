@@ -4,7 +4,9 @@
 #   AppleAudio.Lifecycle.Tests 要 NativeAOT 产物才覆盖 GCHandle 槽复用（dotnet run 走 JIT 时测试自己抛「本回归必须运行NativeAOT产物」，10-29 普查的「单跑红」就是这个）：
 #   按 services/README.md 发布后跑产物（11-01 审计 P1-64；本机与 gate-host 实测发布 + 运行全过）。非 macOS 没有 Apple 音频后端：其余全过时退出 75（环境未就绪）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-DN=${DOTNET:-$HOME/.dotnet/dotnet}; [ -x "$DN" ] || DN=$(command -v dotnet)
+DN=${DOTNET:-$HOME/.dotnet/dotnet}; [ -x "$DN" ] || DN=$(command -v dotnet || true)
+# 没有 .NET SDK：这支没跑，退 75（环境未就绪，审计 P1-154）；原先 DN 为空仍去执行 timeout 600 ""，rc=127 记成真红
+[ -n "$DN" ] || { echo "services_lifecycle：没有 .NET SDK，没跑（环境未就绪）" >&2; exit 75; }
 bad=0; n=0
 run() { n=$((n + 1)); local o r; o=$(MSBUILDDISABLENODEREUSE=1 timeout 600 "$DN" run -c Release --project "$1" --artifacts-path "$T/$n" 2>&1 < /dev/null); r=$?
   if [ $r = 0 ]; then echo "通 ${1#$H/}：$(tail -1 <<< "$o" | cut -c1-120)"; else echo "不通 ${1#$H/}（rc=${r}）：$(tail -3 <<< "$o" | tr '\n' ' ' | cut -c1-300)"; bad=1; fi; }

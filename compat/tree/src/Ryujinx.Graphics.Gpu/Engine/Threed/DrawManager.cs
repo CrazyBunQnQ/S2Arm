@@ -464,6 +464,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
             float srcX1 = ((float)_state.State.DrawTextureDuDx / (1UL << 32)) * dstWidth + srcX0;
             float srcY1 = ((float)_state.State.DrawTextureDvDy / (1UL << 32)) * dstHeight + srcY0;
 
+            // S2A（#468）：这次绘制用宿主自己的程序，上一个客户机程序的输出映射不适用。
+            engine.S2AClearFragmentOutputMap();
+
             engine.UpdateState(ulong.MaxValue & ~(1UL << StateUpdater.ShaderStateIndex));
 
             _channel.TextureManager.UpdateRenderTargets();

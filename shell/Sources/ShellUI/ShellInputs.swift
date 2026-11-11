@@ -1,3 +1,4 @@
+// S2Arm modification: expose the host callback for persistent game reordering.
 import Foundation
 import CoreGraphics
 
@@ -240,6 +241,8 @@ public struct PadSnapshot: Equatable, Sendable {
 /// All effects leave the package through these closures. The game ID is always explicit.
 /// An optional closure the host leaves nil has no handler: the button for it is not shown, so nothing on screen does nothing.
 public struct ShellActions {
+    /// Inserts the dragged games before an ID, or at the end when the destination is nil.
+    public var onReorderGames: (([String], String?) -> Bool)? = nil
     public var onSelect: (String) -> Void
     public var onPlay: (String) -> Void
     public var onChange: (_ gameID: String, _ settingID: String, _ value: String) -> Void

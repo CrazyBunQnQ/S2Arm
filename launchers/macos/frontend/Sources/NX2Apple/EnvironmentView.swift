@@ -42,6 +42,7 @@ struct EnvironmentView: View {
                                 .buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.busy)
                         }
                     }
+                    InstallModeCard(model: model)   // 装到 iPhone 的方式（v0.3.0：签名 / 安装入口收在这一处）
                     let failing = model.checks.filter { !$0.ok }
                     if !failing.isEmpty || model.environmentError != nil {
                         CopyReportButton(model: model, gameID: nil, operations: nil,

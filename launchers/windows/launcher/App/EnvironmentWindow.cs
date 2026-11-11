@@ -53,6 +53,7 @@ public sealed partial class EnvironmentWindow : Window
         Opened += (_, _) =>
         {
             StartControl(); FinishPendingUpdate(); _ = CheckForUpdateAsync(); _ = LoadNoticeAsync();
+            _ = RecoverBatchAsync();   // 上次没出完的批量出包读回来（BatchPage.cs）
             // 已有游戏库（存过位置，或默认位置建好过）就一启动连上，同 Mac：原先只有控制口开着才连，玩家默认不开，
             //   开机 catalog 为空、点「游戏库」一直是欢迎页（社区贡献者补丁 #1）。全新玩家照旧走欢迎页，不替他建库
             if (File.Exists(LibraryPreference) || File.Exists(Path.Combine(SavedLibrary(), ".s2arm-library.json"))) EnsureLibrary(() => { });
@@ -120,6 +121,8 @@ public sealed partial class EnvironmentWindow : Window
             language = languages.SelectedIndex == 0 ? "zh-Hans" : "en"; Render();
         };
         if (PhonePill() is { } phonePill) rightBar.Children.Add(phonePill);
+        if (BatchPill() is { } batchPill) rightBar.Children.Add(batchPill);
+        if (PhoneUpdateControl() is { } phoneUpdate) rightBar.Children.Add(phoneUpdate);   // 更新 iPhone 上的 S2Arm（壳比本版旧才出现，InstallModePage.cs）
         AddUpdateControls(rightBar);
         rightBar.Children.Add(languages);
 
@@ -178,7 +181,7 @@ public sealed partial class EnvironmentWindow : Window
             panel.Children.Add(dismiss);
             body.Children.Add(Card(panel));
         }
-        if (RenderPackPages(body)) return;
+        if (RenderPackPages(body) || RenderBatchPage()) return;
         if (importDialog is not null)
         {
             RenderImportDialog(body);
@@ -228,6 +231,7 @@ public sealed partial class EnvironmentWindow : Window
         libraryChange.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(libraryChange, 1); libraryRow.Children.Add(libraryChange);
         body.Children.Add(Card(libraryRow));
+        body.Children.Add(InstallModeCard());   // 装到 iPhone 的方式（v0.3.0，InstallModePage.cs）
 
         var aiRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         var aiText = new StackPanel { Spacing = 4 };

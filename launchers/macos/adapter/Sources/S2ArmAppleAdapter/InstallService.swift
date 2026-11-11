@@ -164,6 +164,17 @@ public final class InstallService {
         try await client.perform("signingProject", extra: [:], events: .discard).result["path"] as? String ?? ""
     }
 
+    /// 装到 iPhone 的方式（installMode 作业，pack/jobs/install.py install_mode_job）：mode 给了就改，返回现况
+    public func installMode(set mode: String? = nil) async throws -> InstallModeInfo {
+        InstallModeInfo(result: try await client.perform("installMode", extra: mode.map { ["mode": $0] } ?? [:], events: .discard).result)
+    }
+
+    /// 更新 iPhone 上的 S2Arm（installUpdate 作业，install.update_phone）：本版壳 + 已有程序模块，只装 App；
+    ///   有要重新出包的款且没 acceptStale → 作业以 container_stale 失败（界面先问玩家）
+    public func updatePhone(acceptStale: Bool = false, events: EventSink = .discard) async throws -> [String: Any] {
+        try await client.perform("installUpdate", extra: acceptStale ? ["acceptStale": true] : [:], events: events).result
+    }
+
     /// 装回只换宿主前的那一版手机 S2Arm（installRestore 作业，pack/jobs/install.py restore_previous）。
     public func restorePrevious(events: EventSink = .discard) async throws {
         _ = try await client.perform("installRestore", extra: [:], events: events)
@@ -175,5 +186,19 @@ public final class InstallService {
         if acceptDropped { extra["acceptDropped"] = true }
         let r = try await client.perform("installRemove", extra: extra, events: events).result
         return RemoveResult(result: r)
+    }
+}
+
+/// 装到 iPhone 的方式：device = 一键装到 iPhone（启动器签名并装），export = 导出、自己签名安装；导出作业合入前 exportAvailable 为 false（界面置灰）
+public struct InstallModeInfo: Equatable, Sendable {
+    public let mode: String
+    public let exportAvailable: Bool
+    public let signMode: String
+    public init(mode: String = "device", exportAvailable: Bool = false, signMode: String = "appleId") {
+        self.mode = mode; self.exportAvailable = exportAvailable; self.signMode = signMode
+    }
+    init(result r: [String: Any]) {
+        self.init(mode: r["mode"] as? String == "export" ? "export" : "device", exportAvailable: r["exportAvailable"] as? Bool ?? false,
+                  signMode: r["signMode"] as? String ?? "appleId")
     }
 }

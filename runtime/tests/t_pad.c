@@ -108,7 +108,9 @@ static void face_buttons(void) {
     ORDER(S2A_PAD_KIND_NINTENDO, 1, 0, 1, 2, 3); ORDER(S2A_PAD_KIND_NINTENDO, 0, 0, 1, 2, 3);   // 任天堂：两种口径都同字母
     ORDER(S2A_PAD_KIND_XBOX, 1, 0, 1, 2, 3);                                                   // Xbox 按字母：Xbox A = Switch A
     ORDER(S2A_PAD_KIND_XBOX, 0, 1, 0, 3, 2);                                                   // Xbox 按位置：Switch A（东）= Xbox B
-    ORDER(S2A_PAD_KIND_PLAYSTATION, 1, 1, 0, 3, 2); ORDER(S2A_PAD_KIND_OTHER, 1, 1, 0, 3, 2);  // PS / 第三方没有可对的字母：只按位置
+    ORDER(S2A_PAD_KIND_PLAYSTATION, 1, 0, 1, 2, 3);                                            // PS 按字母（缺省）：同 Xbox 位置，× = Switch A（#466）
+    ORDER(S2A_PAD_KIND_PLAYSTATION, 0, 1, 0, 3, 2);                                            // PS 按位置：Switch A（东）= ○
+    ORDER(S2A_PAD_KIND_OTHER, 1, 1, 0, 3, 2);                                                  // 认不出类型的第三方：只按位置
 #undef ORDER
     unsetenv("S2A_PAD_FACE"); assert(s2a_pad_face_by_letter() == 1);   // 缺省按字母
     s2a_pad_face_set(0); assert(s2a_pad_face_by_letter() == 0); s2a_pad_face_set(1); assert(s2a_pad_face_by_letter() == 1);

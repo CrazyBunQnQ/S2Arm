@@ -2591,6 +2591,126 @@ namespace S2A.Services.Tests
 
                     Environment.SetEnvironmentVariable("S2A_SAVE_DIR", null);
                     Directory.Delete(sd, true);
+
+                    // 存档位置 SaveData（11-09，SaveFolder.cs）：识别（规则同 pack/jobs/save_formats.py）、起局读入、退出写回。期望按规则手写
+                    {
+                        string pid = Application.ProgramId.ToString("x16");
+                        string t = Path.Combine(Path.GetTempPath(), $"s2a_savedata_{Environment.ProcessId}");
+                        if (Directory.Exists(t)) Directory.Delete(t, true);
+                        string D(string name, params (string rel, byte[] data)[] files)
+                        {
+                            string d = Path.Combine(t, name);
+                            foreach (var (rel, data) in files) { string f = Path.Combine(d, rel); Directory.CreateDirectory(Path.GetDirectoryName(f)); File.WriteAllBytes(f, data); }
+                            return d;
+                        }
+                        string K(string root, System.Collections.Generic.List<(string kind, string dir)> r, string why) =>
+                            r == null ? $"无（{why}）" : string.Join("+", r.Select(x => x.kind + ":" + (Path.GetRelativePath(root, x.dir) is var rel && rel == "." ? "." : rel)));
+                        var own = new System.Collections.Generic.HashSet<string> { "Saved Games" };
+                        string w;
+                        string sd_a1 = D("a", ("save/x.bin", [1]), ("save_device/y.bin", [2]));
+                        string sd_b1 = D("b", ($"0x{pid} Game/2026-01-01/x.bin", [1]), ($"0x{pid} Game/2026-02-01/x.bin", [2]));
+                        Directory.SetLastWriteTimeUtc(Path.Combine(sd_b1, $"0x{pid} Game", "2026-01-01"), new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+                        Directory.SetLastWriteTimeUtc(Path.Combine(sd_b1, $"0x{pid} Game", "2026-02-01"), new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+                        string sd_c1 = D("c", ("JKSV/Game/P1 - 2026.01.01 @ 10.00.00/x.bin", [1]), ("JKSV/Game/P1 - 2026.02.01 @ 10.00.00/x.bin", [2]));
+                        Directory.SetLastWriteTimeUtc(Path.Combine(sd_c1, "JKSV/Game/P1 - 2026.01.01 @ 10.00.00"), new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+                        Directory.SetLastWriteTimeUtc(Path.Combine(sd_c1, "JKSV/Game/P1 - 2026.02.01 @ 10.00.00"), new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+                        string sd_r1 = D("r", ("bis/user/save/0000000000000005/0/x.bin", [1]));
+                        byte[] meta = new byte[0x40]; BitConverter.GetBytes(Application.ProgramId).CopyTo(meta, 0); meta[0x20] = 3;
+                        File.WriteAllBytes(Path.Combine(sd_r1, "bis/user/save/0000000000000005/ExtraData0"), meta);
+                        string sd_e1 = D("e", ("0x0100000000001000 Other/2026/x.bin", [1]));
+                        string sd_f1 = D("f", ("MySave/data.bin", [1]));
+                        string sd_g1 = D("g", ("cheats/a.txt", [1]));
+                        string sd_h1 = D("h", ("Saved Games/data.bin", [1]));
+                        string got = string.Join(" / ", new[] { sd_a1, sd_b1, sd_c1, sd_r1, sd_e1, sd_f1, sd_g1, sd_h1 }.Select(d => K(d, SaveFolder.Detect(d, Application.ProgramId, own, out w), w)));
+                        Check("存档位置识别：固定结构 / Checkpoint 取最新 / JKSV 取最新 / Ryujinx / 别款 / 外面套一层 / 金手指 / 游戏自己的顶层目录",
+                            $"save:save+device:save_device / save:0x{pid} Game/2026-02-01 / save:JKSV/Game/P1 - 2026.02.01 @ 10.00.00 / device:bis/user/save/0000000000000005/0 / 无（这是另一款游戏的存档（程序号 0100000000001000）） / save:MySave / 无（放进来的是金手指（cheats），不是存档） / save:.",
+                            got);
+
+                        // 起局读入 → 退出写回：放 save/（账号）+ save_device/（设备）→ 读入后两份存档是放进来的内容；写回后存档位置是固定结构、内容一致；
+                        //   再起局（摘要和写回时一样）不读（当前存档改成 [9] 后仍是 [9]）；局内玩家动过存档位置 → 退出不写回（玩家放的文件还在）
+                        string folder = Path.Combine(t, "SaveData");
+                        string state = Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, SaveFolder.StateFile);
+                        File.Delete(state);
+                        Environment.SetEnvironmentVariable("S2A_SAVE_FOLDER", folder);
+                        var uidF = Host.Device.System.AccountManager.LastOpenedUser.UserId;
+                        var fuF = new LibHac.Fs.UserId((ulong)uidF.High, (ulong)uidF.Low);
+                        byte[] prog = new byte[3000]; new Random(5).NextBytes(prog);
+                        D("SaveData", ("save/0/progress.sav", prog), ("save_device/dev.dat", [5, 6]));
+                        long redF = Red.Total;
+                        SaveFolder.ReadIn(Host.Device, Application.ProgramId);
+                        byte[] accIn = ReadDeviceSave("/0/progress.sav", fuF), devIn = ReadDeviceSave("/dev.dat");
+                        SaveFolder.WriteBack(Host.Device);
+                        byte[] accOut = File.Exists(Path.Combine(folder, "save/0/progress.sav")) ? File.ReadAllBytes(Path.Combine(folder, "save/0/progress.sav")) : null;
+                        byte[] devOut = File.Exists(Path.Combine(folder, "save_device/dev.dat")) ? File.ReadAllBytes(Path.Combine(folder, "save_device/dev.dat")) : null;
+                        string nine = D("nine", ("dev.dat", [9]));
+                        Saves.SeedFrom(Host.Device, Application.ProgramId, [("device", nine)]);
+                        SaveFolder.ReadIn(Host.Device, Application.ProgramId);
+                        byte[] devKept = ReadDeviceSave("/dev.dat");
+                        File.WriteAllBytes(Path.Combine(folder, "player.bin"), [7]);   // 局内玩家往存档位置里放了东西
+                        SaveFolder.WriteBack(Host.Device);
+                        bool playerKept = File.Exists(Path.Combine(folder, "player.bin"));
+                        byte[] devStill = File.Exists(Path.Combine(folder, "save_device/dev.dat")) ? File.ReadAllBytes(Path.Combine(folder, "save_device/dev.dat")) : null;
+                        Check("存档位置：起局读入 / 退出写回 / 没动不读 / 局内动过不写回",
+                            "账号 3000 字节一致、设备 [5,6]；写回 save/0/progress.sav 一致、save_device/dev.dat [5,6]；再起局设备仍 [9]；玩家文件在、save_device/dev.dat 仍 [5,6]、报红 +0",
+                            $"账号 {(accIn != null && accIn.AsSpan().SequenceEqual(prog) ? "3000 字节一致" : accIn == null ? "缺" : "不一致")}、设备 {(devIn == null ? "缺" : "[" + string.Join(",", devIn) + "]")}；" +
+                            $"写回 save/0/progress.sav {(accOut != null && accOut.AsSpan().SequenceEqual(prog) ? "一致" : accOut == null ? "缺" : "不一致")}、save_device/dev.dat {(devOut == null ? "缺" : "[" + string.Join(",", devOut) + "]")}；" +
+                            $"再起局设备仍 {(devKept == null ? "缺" : "[" + string.Join(",", devKept) + "]")}；玩家文件{(playerKept ? "在" : "不在")}、save_device/dev.dat 仍 {(devStill == null ? "缺" : "[" + string.Join(",", devStill) + "]")}、报红 +{Red.Total - redF}");
+                        // 放进来的认不出（只有金手指）：不读、写原因；退出不写回，玩家放的原样留着（11-09 Mac 实测发现：原先退出时被当前存档盖掉）
+                        Directory.Delete(folder, true);
+                        D("SaveData", ("cheats/a.txt", [1]));
+                        long redK = Red.Total;
+                        SaveFolder.ReadIn(Host.Device, Application.ProgramId);
+                        string problem = File.Exists(Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, SaveFolder.ProblemFile)) ? File.ReadAllText(Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, SaveFolder.ProblemFile)) : "无";
+                        SaveFolder.WriteBack(Host.Device);
+                        Check("存档位置：认不出 → 不读、写原因、退出不写回", "原因 放进来的是金手指（cheats），不是存档、cheats/a.txt 还在、没有 save/、报红 +1",
+                            $"原因 {problem}、cheats/a.txt {(File.Exists(Path.Combine(folder, "cheats/a.txt")) ? "还在" : "没了")}、{(Directory.Exists(Path.Combine(folder, "save")) ? "有" : "没有")} save/、报红 +{Red.Total - redK}");
+                        File.Delete(Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, SaveFolder.ProblemFile));
+
+                        // 审计 P1-161：第一次放进来（游戏还没有存档、ownTop 空）不剥游戏自己的单层目录；游戏自己的十六进制顶层名也不剥（原先两种都剥）
+                        var none = new System.Collections.Generic.HashSet<string>();
+                        string sd_p1 = D("p1", ("slot0/data.bin", [1])), sd_p2 = D("p2", ("0123456789abcdef/data.bin", [1])), sd_p3 = D("p3", ("JKSV/Game/P1 - 2026.01.01 @ 10.00.00/x.bin", [1]));
+                        var hexOwn = new System.Collections.Generic.HashSet<string> { "0123456789abcdef" };
+                        Check("存档位置识别（P1-161）：首次放入单层目录不剥 / 游戏自己的十六进制顶层不剥 / 首次 JKSV 照剥",
+                            "save:. / save:. / save:JKSV/Game/P1 - 2026.01.01 @ 10.00.00",
+                            $"{K(sd_p1, SaveFolder.Detect(sd_p1, Application.ProgramId, none, out w), w)} / {K(sd_p2, SaveFolder.Detect(sd_p2, Application.ProgramId, hexOwn, out w), w)} / {K(sd_p3, SaveFolder.Detect(sd_p3, Application.ProgramId, none, out w), w)}");
+
+                        // 审计 P1-163：摘要按内容。同路径同大小同修改时间、内容不同 → 摘要不同；只改修改时间 → 摘要不变（原先两向都错）
+                        string dg = D("dg", ("save/slot.bin", [1, 2, 3, 4]));
+                        string slot = Path.Combine(dg, "save/slot.bin"); var keepT = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                        File.SetLastWriteTimeUtc(slot, keepT); string d0 = SaveFolder.Digest(dg);
+                        File.WriteAllBytes(slot, [9, 9, 9, 9]); File.SetLastWriteTimeUtc(slot, keepT); string d1 = SaveFolder.Digest(dg);
+                        File.SetLastWriteTimeUtc(slot, keepT.AddDays(3)); string d2 = SaveFolder.Digest(dg);
+                        Check("存档位置摘要（P1-163）：保留时间的同大小替换看得出 / 只动修改时间不算换过", "换了内容：不同；只改时间：相同",
+                            $"换了内容：{(d0 != d1 ? "不同" : "相同")}；只改时间：{(d1 == d2 ? "相同" : "不同")}");
+
+                        // 审计 P1-162：写回带上用户号；存档位置里的 user 文件 / Ryujinx 导出 ExtraData0 偏移 0x8 的用户号都认得出
+                        if (Directory.Exists(folder)) Directory.Delete(folder, true);
+                        File.Delete(state);
+                        D("SaveData", ("save_device/dev.dat", [4]));
+                        SaveFolder.ReadIn(Host.Device, Application.ProgramId);
+                        SaveFolder.WriteBack(Host.Device);
+                        string wantUser = Host.Device.System.AccountManager.LastOpenedUser.UserId.ToString();
+                        string userFile = Path.Combine(folder, "user");
+                        string sd_u = D("u", ("bis/user/save/0000000000000007/0/x.bin", [1]));
+                        byte[] metaU = new byte[0x40]; BitConverter.GetBytes(Application.ProgramId).CopyTo(metaU, 0); metaU[0x20] = 1;
+                        BitConverter.GetBytes(0x1122334455667788L).CopyTo(metaU, 0x8); BitConverter.GetBytes(0x0102030405060708L).CopyTo(metaU, 0x10);
+                        File.WriteAllBytes(Path.Combine(sd_u, "bis/user/save/0000000000000007/ExtraData0"), metaU);
+                        Check("存档位置用户号（P1-162）：写回带 user / 读 user 文件 / 读 Ryujinx 导出",
+                            $"user={wantUser} / {wantUser} / 11223344556677880102030405060708",
+                            $"user={(File.Exists(userFile) ? File.ReadAllText(userFile).Trim() : "缺")} / {SaveFolder.FolderUser(folder, Application.ProgramId) ?? "无"} / {SaveFolder.FolderUser(sd_u, Application.ProgramId) ?? "无"}");
+
+                        // 审计 P2-267：写回换到一半断了（现目录已改名 .old、.next 还没改回来）→ 起局放回写全了的 .next，不放 .old（放 .old 会把旧档当新放的、盖掉进度）
+                        Directory.Delete(folder, true);
+                        D("SaveData.next", ("save_device/dev.dat", [8]));
+                        D("SaveData.old", ("save_device/dev.dat", [1]));
+                        SaveFolder.ReadIn(Host.Device, Application.ProgramId);
+                        string rec = File.Exists(Path.Combine(folder, "save_device/dev.dat")) ? "[" + string.Join(",", File.ReadAllBytes(Path.Combine(folder, "save_device/dev.dat"))) + "]" : "缺";
+                        Check("存档位置（P2-267）：写回中断后起局放回本局进度", "现目录 [8]、.next 没了、.old 没了",
+                            $"现目录 {rec}、.next {(Directory.Exists(folder + ".next") ? "还在" : "没了")}、.old {(Directory.Exists(folder + ".old") ? "还在" : "没了")}");
+                        Environment.SetEnvironmentVariable("S2A_SAVE_FOLDER", null);
+                        File.Delete(state);
+                        Directory.Delete(t, true);
+                    }
                 }
             }
             else
@@ -2903,16 +3023,40 @@ namespace S2A.Services.Tests
                 Check("系统语言：跳过认不出的取下一个 / 列表空回美式英语", "TraditionalChinese / AmericanEnglish", $"{a} / {b}");
                 string env = Environment.GetEnvironmentVariable("S2A_SYSTEM_LANGUAGE");
                 Check("系统语言：显式 S2A_SYSTEM_LANGUAGE 优先，否则跟本机首选", string.IsNullOrEmpty(env) ? SystemLocale.FromPreferred(SystemLocale.Preferred(), out _).ToString() : env, Host.Language.ToString());
-                // 游戏不支持系统语言时的退路（11-03 GB4 / FFR / JUMP FORCE 亚洲版只收韩 / 繁 / 简，上游取第一个 = 韩语）：系统首选依次 → 简中 → 繁中 → 英语，都不支持才取游戏首选
+                // 游戏不支持系统语言时的退路（维护者 11-10「根据咱们宿主来识别语言种类」）：只看宿主主语言，① 主语言 → ② 同族变体 → ③ 美式 / 英式英语 → ④ 简中 / 繁中 → ⑤ 支持表第一项
                 var TL = typeof(Ryujinx.HLE.HOS.SystemState.TitleLanguage);
-                string fb = string.Join(",", SystemLocale.TitleFallback(new[] { "en-US", "ja-JP", "xx-YY" }));
-                Check("语言退路列表：en-US, ja-JP, 认不出的 → 首选依次 + 简中 / 繁中 / 英式英语（去重）", "AmericanEnglish,Japanese,SimplifiedChinese,TraditionalChinese,BritishEnglish", fb);
-                int asia = (1 << 12) | (1 << 13) | (1 << 14), jpKo = (1 << 2) | (1 << 12), deOnly = 1 << 4;   // 韩 / 繁 / 简；日 / 韩；只有德语
-                var pick = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.PickFallbackLanguage;
-                var list = SystemLocale.TitleFallback(new[] { "en-US" });
-                Check("语言退路：亚洲版（韩 / 繁 / 简）→ 简中；日 / 韩 + 首选含日语 → 日语；只有德语 → 德语；不给退路 = 上游取第一个（韩）",
-                    "SimplifiedChinese / Japanese / German / Korean",
-                    $"{Enum.GetName(TL, pick(asia, list))} / {Enum.GetName(TL, pick(jpKo, SystemLocale.TitleFallback(new[] { "en-US", "ja-JP" })))} / {Enum.GetName(TL, pick(deOnly, list))} / {Enum.GetName(TL, pick(asia, null))}");
+                var SL = Ryujinx.HLE.HOS.SystemState.SystemLanguage.SimplifiedChinese;
+                Check("语言退路列表：宿主简中 / 美式英语 / 日语 / 德语", "SimplifiedChinese,TraditionalChinese,AmericanEnglish,BritishEnglish / AmericanEnglish,BritishEnglish,SimplifiedChinese,TraditionalChinese / Japanese,AmericanEnglish,BritishEnglish,SimplifiedChinese,TraditionalChinese / German,AmericanEnglish,BritishEnglish,SimplifiedChinese,TraditionalChinese",
+                    string.Join(" / ", Array.ConvertAll(new[] { SL, Ryujinx.HLE.HOS.SystemState.SystemLanguage.AmericanEnglish, Ryujinx.HLE.HOS.SystemState.SystemLanguage.Japanese, Ryujinx.HLE.HOS.SystemState.SystemLanguage.German },
+                        l => string.Join(",", SystemLocale.TitleFallback(l)))));
+                // 支持位按 TitleLanguage：美式英语 0、日 2、德 4、韩 12、繁 13、简 14。#445 那款声明 0x3005 = 美 / 日 / 韩 / 繁
+                var pick = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.PickDesiredLanguage;
+                var step = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.LanguageStep;
+                string Sel(Ryujinx.HLE.HOS.SystemState.SystemLanguage host, int supported)
+                {
+                    var hostT = Enum.Parse<Ryujinx.HLE.HOS.SystemState.TitleLanguage>(host.ToString());
+                    var fb = SystemLocale.TitleFallback(host);
+                    int p = pick(hostT, supported, fb);
+                    return $"{Enum.GetName(TL, p)}（{step(hostT, p, fb)}）";
+                }
+                int g445 = 0x3005, jaEn = (1 << 2) | (1 << 0), enHant = (1 << 0) | (1 << 13), koOnly = (1 << 12) | (1 << 2), asia = (1 << 12) | (1 << 13) | (1 << 14);
+                Check("语言选择：宿主简中 + 美 / 日 / 韩 / 繁 → 繁中；宿主简中 + 日 / 英 → 英语；宿主日语 + 英 / 繁 → 英语；宿主简中 + 简 → 简中；宿主德语 + 日 / 韩 → 日语（支持表第一项）；宿主美式英语 + 韩 / 繁 / 简 → 简中（11-03 亚洲版不回退韩语）",
+                    "TraditionalChinese（第 2 步：同族变体） / AmericanEnglish（第 3 步：英语） / AmericanEnglish（第 3 步：英语） / SimplifiedChinese（第 1 步：宿主主语言） / Japanese（第 5 步：游戏支持表第一项） / SimplifiedChinese（第 4 步：中文）",
+                    $"{Sel(SL, g445)} / {Sel(SL, jaEn)} / {Sel(Ryujinx.HLE.HOS.SystemState.SystemLanguage.Japanese, enHant)} / {Sel(SL, 1 << 14)} / {Sel(Ryujinx.HLE.HOS.SystemState.SystemLanguage.German, koOnly)} / {Sel(Ryujinx.HLE.HOS.SystemState.SystemLanguage.AmericanEnglish, asia)}");
+                // #465：Switch 2 合成件（导出没有控制分区，显示版本 "?"、只声明英语）→ 直接回宿主主语言；Switch 1 合成件（#401 NUP）不走这条，照旧英语退路；真游戏走五步
+                var s2u = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.Switch2LanguagesUnknown;
+                Check("Switch 2 语言未知判定：04 款合成件（只声明英语、版本 ?）/ 04 款位为 0 / 01 款合成件（#401）/ 04 款真 NACP 0x3005 版本 1.0.2", "True / True / False / False",
+                    $"{s2u(0x0400486024DEC000, 1, "?")} / {s2u(0x0400486024DEC000, 0, "")} / {s2u(0x0100E95004038000, 1, "?")} / {s2u(0x0400486024DEC000, 0x3005, "1.0.2")}");
+                // 审计 P2-275：已知语言是第 0–17 位（16 波兰语、17 泰语）；只支持波兰语 / 泰语不能当「没有语言」，未定义的位不算
+                var noLang = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.NoKnownLanguages;
+                Check("支持语言判定：无位 / 只有波兰语 / 只有泰语 / 只有第 18 位（未定义）/ 04 款只声明波兰语、版本 1.0.0 算未知？",
+                    "True / False / False / True / False",
+                    $"{noLang(0)} / {noLang(1 << 16)} / {noLang(1 << 17)} / {noLang(1 << 18)} / {s2u(0x0400486024DEC000, 1 << 16, "1.0.0")}");
+                // 01 款合成件 + 宿主简中：不进 Switch 2 那条，按五步走 → 只声明英语 → 美式英语（不回退 #401）
+                Check("Switch 1 合成件（只声明英语）+ 宿主简中 → 美式英语（#401 不回退）", "AmericanEnglish（第 3 步：英语）", Sel(SL, 1));
+                // 支持语言位为 0（合成的 control.nacp）：缺省回美式英语（#401）；玩家显式指定系统语言时回它。语言码 = ASCII 小端："ja" = 0x616A、"en-US" = 0x53552D6E65
+                var zero = Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.IApplicationFunctions.ZeroSupportedLanguageCode;
+                Check("支持语言位为 0：系统日语、没显式指定 → en-US；显式指定日语 → ja", "0x53552D6E65 / 0x616A", $"0x{zero(0x616A, false):X} / 0x{zero(0x616A, true):X}");
             }
 
             // ---- 主机 / 掌机档（维护者 10-20 晚改回缺省掌机）：apm GetPerformanceMode 由 Ryujinx 按 DockedMode 回答，掌机档 = 0（Normal）、主机档 = 1（Boost）----

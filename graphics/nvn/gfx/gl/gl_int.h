@@ -49,6 +49,7 @@ struct gl_buffer {
     __strong NSMutableDictionary *fan32_cache;
     GLenum map_access; uint8_t used;   // map_access：glMapBuffer 的访问方式（0 = 没映射）；used：绑定过（glIsBuffer 规范：Gen 出的名字第一次绑定才成为缓冲对象）
     GLbitfield map_bits; size_t map_off, map_len;   // glMapBufferRange 的访问位与映射范围（glFlushMappedBufferRange 核范围用；glMapBuffer = 整块、位 0）
+    GLbitfield storage;   // glBufferStorage 的标志位（不可变存储；0 = glBufferData 建的可变存储）
 };   // idx16：整块 ubyte→ushort 副本；fan32_cache：本版内容按 (offset,count,type) 缓存的三角扇副本表。写入后失效；last_use 只跟踪原存储。
 typedef struct { GLuint buf; GLint size; GLenum type; GLuint norm, enabled; GLsizei stride; GLintptr off; GLuint divisor; } gl_attrib;
 struct gl_vao { gl_attrib a[16]; GLuint ebo; };                    // gl_buf.m
@@ -80,7 +81,7 @@ typedef struct {
     EGLenum api;                                          // 创建上下文时选择的 OpenGL / OpenGL ES API
     GLuint vao, prog, fb_draw, fb_read, buf_bound[16];   // 当前绑定（buf_bound 按 gl_buf_slot() 的目标序号）
     GLint unpack_align, unpack_row, pack_align; // 上下文像素存储；eglCreateContext 初始4/0/4（pack_align：glGetTexImage 等读回的行对齐）。
-    GLuint rb_bound; GLfloat poly_factor, poly_units, line_width;    // 当前渲染缓冲、多边形偏移（glPolygonOffset，开 GL_POLYGON_OFFSET_FILL 才生效）
+    GLuint rb_bound; GLfloat poly_factor, poly_units, line_width, point_size;    // 当前渲染缓冲、多边形偏移（glPolygonOffset，开 GL_POLYGON_OFFSET_FILL 才生效）
     GLuint tex_unit[32][8], smp_unit[32], active_unit;    // 纹理单元 × 目标（gl_tex_slot()）、采样器
     gl_texture *default_tex[4];                           // 默认 2D / cube / 2D 数组 / 3D：上下文私有，同目标跨单元共用；不进名字表
     GLuint ubo[32]; GLintptr ubo_off[32]; GLsizeiptr ubo_size[32];
@@ -97,7 +98,7 @@ typedef struct {
     struct gl_vao default_vao;                            // 0 号顶点数组（GLES 缺省顶点数组）：每个上下文一个、不共享（GLES 3.2 §10.3.1 容器对象）
     uint32_t dirty;                                       // GLD_*：哪些状态变了、下一笔绘制要重取管线 / 重绑
 } gl_state;
-enum { GLE_CULL = 1, GLE_DEPTH = 2, GLE_STENCIL = 4, GLE_SCISSOR = 16, GLE_POLY_OFFSET = 32, GLE_COLOR_TABLE = 64 };   // gl_state.enable 的位；混合开关在 color[i].blend
+enum { GLE_CULL = 1, GLE_DEPTH = 2, GLE_STENCIL = 4, GLE_SCISSOR = 16, GLE_POLY_OFFSET = 32, GLE_COLOR_TABLE = 64, GLE_FB_SRGB = 128 };   // gl_state.enable 的位；混合开关在 color[i].blend
 enum { GLD_PIPE = 1, GLD_DSS = 2, GLD_VP = 4, GLD_SC = 8, GLD_RES = 16, GLD_VB = 32 };
 extern __thread gl_state *gl_cur;   // 本线程的当前上下文状态（egl.m 在 MakeCurrent 时设；每个线程各绑各的，同 EGL 规范）
 void gl_set_error(GLenum e);      // 只记第一个（规范：多个错误时 glGetError 逐个取，这里只留第一个，够用到普查出现反例为止）

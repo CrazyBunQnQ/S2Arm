@@ -282,6 +282,46 @@ class RelocateDefaultTests(unittest.TestCase):
         self.assertFalse((self.private / "library-location.txt").exists())
         self.assertEqual(layout.relocate_default(self.private, win), self.target)   # 前端之后照旧传旧路径也落到新位置
 
+    def test_concurrent_jobs_all_get_the_new_location(self):
+        # v0.2.5 发版用例 upgrade ① 两次红：启动器一打开同时起好几个作业，各自走 relocate_default。期望（手写）：只搬一次，
+        #   每个作业都拿到新位置，旧目录不会被拿着旧路径的作业再建出来。复现法：第一个作业判断完、改名前停住，第二个作业这时进来
+        import threading
+        win = self.private / "DefaultLibrary"
+        os.replace(self.old, win)
+        first_in, release, results = threading.Event(), threading.Event(), {}
+        real_idle = layout._idle
+        def slow_idle(lib):
+            if not first_in.is_set():
+                first_in.set(); release.wait(5)   # 第一个作业停在改名前
+            return real_idle(lib)
+        def job(name):
+            results[name] = layout.relocate_default(self.private, win)
+        with patch.object(layout, "_idle", slow_idle):
+            a = threading.Thread(target=job, args=("a",)); a.start()
+            first_in.wait(5)
+            b = threading.Thread(target=job, args=("b",)); b.start()
+            b.join(0.5)              # 第二个作业在等锁，不能先判断
+            self.assertTrue(b.is_alive())
+            release.set(); a.join(5); b.join(5)
+        self.assertEqual(results, {"a": self.target, "b": self.target})
+        self.assertFalse(win.exists())
+        self.assertEqual((self.target / "games" / "G" / "saves" / "s.dat").read_text(), "save")
+
+    def test_rename_refused_leaves_library_and_no_moving_marker(self):
+        # 旧库里有文件被别的程序开着（Windows 上整目录改不了名）：库原样不动、照旧用旧位置，不留「正在搬」的标记，下次再试；绝不半搬
+        win = self.private / "DefaultLibrary"
+        os.replace(self.old, win)
+        real_replace = os.replace
+        def refuse(src, dst):   # 只拒搬库那次整目录改名；写标记的原子写照常
+            if Path(src) == win: raise PermissionError(13, "被占用")
+            return real_replace(src, dst)
+        with patch.object(layout.os, "replace", side_effect=refuse):
+            self.assertEqual(layout.relocate_default(self.private, win), win)
+        self.assertEqual((win / "games" / "G" / "saves" / "s.dat").read_text(), "save")
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.private / "library-relocate.json").exists())
+        self.assertEqual(layout.relocate_default(self.private, win), self.target)   # 占用解除后下次照常搬
+
     def test_killed_after_rename_finishes_on_next_job(self):
         atomic(self.private / "library-relocate.json", {"schema": 1, "from": str(self.old), "to": str(self.target), "state": "moving"})
         os.replace(self.old, self.target)   # 改完名就被杀：设置、索引都还是旧路径

@@ -103,6 +103,10 @@ int main(int argc,char **argv) {
     assert(argc==4);mode=atoi(argv[1]);good=argv[2];bad=argv[3];
     setenv("S2A_SHADER_REVISION_ROOT",mode==16?"relative":"/revision",1);
     setenv("S2A_DIRECT_CACHE_DIR",mode==16?"":"/private",1);
+    /* 本用例验 lookup→build→finish 主链，对象生命周期断言按「缓存对象留表」不成立写死——
+     * 缓存行为归 w2_compute_pipeline 验收；两门钉 0 防环境注入（pso 默认开、prog 默认关）。 */
+    setenv("S2A_COMPUTE_PSO_CACHE","0",1);
+    setenv("S2A_COMPUTE_PROG_CACHE","0",1);
     const char *hash="sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const char *profile="{\"schema\":\"s2a-direct-profile-v1\",\"profileHash\":\"sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"capabilities\":{\"storageBufferOffsetAlignment\":16}}";
     pc=(struct s2a_direct_compile_context){.session=11,.generation=22,.direct_abi=1,

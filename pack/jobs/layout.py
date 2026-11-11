@@ -899,11 +899,53 @@ def standard_private():
     return Path.home() / "Library" / "Application Support" / "S2Arm"
 
 
+RELOCATE_LOCK = ".relocate.lock"
+RELOCATE_LOCK_WAIT = 60   # 等另一个作业搬完的上限（秒）；同卷改名一瞬间，等这么久说明那边卡住了
+
+
 def relocate_default(private, library):
-    """请求里的库是旧默认位置时 → 该用的库路径（已搬 / 这次搬成 → 新位置；否则原样）。Context 建任务时调，别的情况一次比较就返回"""
+    """请求里的库是旧默认位置时 → 该用的库路径（已搬 / 这次搬成 → 新位置；否则原样）。Context 建任务时调，别的情况一次比较就返回。
+    判断和改名在私有目录的 .relocate.lock 里做（v0.2.5 发版用例 upgrade ① 两次红）：启动器一打开会同时起好几个作业，原先各自判断——
+    后到的那个读标记时前一个还没写、等它看「新位置在不在」时前一个已经改完名，就当成「新位置被占」原样返回旧路径；或者两个都去改名，
+    后一个改名失败也返回旧路径。拿着旧路径的作业把旧目录（任务记录、日志、锁文件）又建了出来：旧库残留、新库缺这些文件。
+    现在后到的等前一个做完，再读标记就直接用新位置"""
     private, library = Path(private), Path(library)
     if library.parent != private or library.name not in OLD_DEFAULTS:
         return library
+    with _relocate_lock(private):
+        return _relocate_locked(private, library)
+
+
+@contextlib.contextmanager
+def _relocate_lock(private):
+    import filelock
+    import time
+    f = None
+    try:
+        private.mkdir(parents=True, exist_ok=True)
+        f = (private / RELOCATE_LOCK).open("a")
+    except OSError:
+        yield   # 私有目录写不了：照旧判断（后面写标记也会失败、原样返回）
+        return
+    held, deadline = False, time.monotonic() + RELOCATE_LOCK_WAIT
+    try:
+        while True:
+            try:
+                filelock.try_lock(f); held = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    break   # 那边卡住了：不再等，照旧判断（标记已写就按标记走）
+                time.sleep(0.05)
+        yield
+    finally:
+        if held:
+            with contextlib.suppress(OSError):
+                filelock.unlock(f)
+        f.close()
+
+
+def _relocate_locked(private, library):
     marker = private / RELOCATE_JSON
     try:
         note = read(marker, {}) or {}
@@ -926,6 +968,11 @@ def relocate_default(private, library):
         atomic(marker, {"schema": 1, "from": str(library), "to": str(target), "state": "moving"})
         os.replace(library, target)
     except OSError:
+        # 改名没成（Windows 上旧库里有文件被别的程序开着时整目录改不了名）：库原样没动，撤掉「正在搬」的标记，照旧用旧位置，下次再试
+        if not os.path.lexists(target):
+            with contextlib.suppress(OSError):
+                if (read(marker, {}) or {}).get("state") == "moving":
+                    marker.unlink()
         return library
     _finish_relocate(private, library, target)
     return target

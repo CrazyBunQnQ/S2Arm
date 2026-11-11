@@ -23,7 +23,7 @@ cc=$(s2a_ndk_clang "$ndk" 29) || { echo "no NDK clang for this host; probe NOT R
 "$cc" -std=c11 -O2 -Wall -Wextra -Werror -I "$repo/android/native/direct" \
     -I "$repo/graphics/nvn/gfx/nvn" -I "$repo/graphics/nvn/gfx/nvn/include" -I "$repo/android/native/nvn" \
     -o "$out/vk_record" "$repo/android/tests/vk_record_test.c" \
-    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/bind_defer.c" "$repo/android/native/direct/vk_device.c" \
+    "$repo/android/native/direct/vk_record.c" "$repo/android/native/direct/t2t_plan.c" "$repo/android/native/direct/buffer_texture_plan.c" "$repo/android/native/direct/bind_defer.c" "$repo/android/native/direct/vk_device.c" \
     "$repo/android/native/nvn/nvn_vk_format.c" "$repo/android/native/direct/vk_clear.c" \
     "$repo/android/native/nvn/nvn_vk_query.c" \
     -lvulkan -llog -lm
