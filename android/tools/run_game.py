@@ -1368,7 +1368,8 @@ def stop_power_sampler(d, dest, pid=None):
     out = d.shell(
         f"pids=\"{pid or ''} $(cat {dest}.pid 2>/dev/null) "
         f"$(pgrep -f {SAMPLER_TAG} 2>/dev/null)\"; killed=; "
-        f"for p in $pids; do grep -aqs {SAMPLER_TAG} /proc/$p/cmdline 2>/dev/null "
+        # 排除 $$：pgrep -f 会把执行这条命令的 shell 自己也匹配上（命令行里带着标记）
+        f"for p in $pids; do [ \"$p\" != \"$$\" ] && grep -aqs {SAMPLER_TAG} /proc/$p/cmdline 2>/dev/null "
         f"&& kill $p 2>/dev/null && killed=\"$killed $p\"; done; "
         f"for p in $killed; do i=0; "
         f"while [ -d /proc/$p ] && [ $i -lt 10 ]; do sleep 0.2; i=$((i+1)); done; "
