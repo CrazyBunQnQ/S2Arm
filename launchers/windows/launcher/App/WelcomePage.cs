@@ -204,9 +204,18 @@ public sealed partial class EnvironmentWindow
     {
         if (connectedFolder is not null && libraryId is not null) { next(); Render(); return; }
         var defaultLib = SavedLibrary();
+        // 玩家没选过位置、缺省位置又被别的文件占着（多半是把 S2Arm 解压到了 %USERPROFILE%\S2Arm）：换到旁边的空位置并记下来，
+        //   原先 setup 拒收后整个添加游戏卡死（v0.2.8 热修，Windows 玩家反馈「一直提示还有任务在进行」）
+        rememberLibrary = !File.Exists(LibraryPreference) && LibraryPaths.FreeDefaultLibrary(defaultLib) is var free && free != defaultLib;
+        if (rememberLibrary) defaultLib = LibraryPaths.FreeDefaultLibrary(defaultLib);
         libraryFolder = defaultLib;
         libraryOperation = EnsureLibraryAsync(defaultLib, next);
     }
+
+    /// <summary>缺省库换过位置（EnsureLibrary）：连上后写进设置，下次启动直接连它</summary>
+    private bool rememberLibrary;
+    /// <summary>游戏库最近一次没连上的原因（建库作业的原话 / 异常）：添加游戏时显示它，不再说成「有任务在进行」</summary>
+    private string libraryFailure = "";
 
     private async Task EnsureLibraryAsync(string folder, Action next)
     {
@@ -222,9 +231,15 @@ public sealed partial class EnvironmentWindow
             var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, cancellation.Token, libraryMoveFrom);
             libraryMoveFrom = null;
             DisplayJob(setup);
-            if (!setup.Report.Succeeded) { librarySummary = "library.failed"; importError = setup.Report.Message; return; }
+            if (!setup.Report.Succeeded) { librarySummary = "library.failed"; importError = libraryFailure = LibraryFailed(folder, setup.Report.Message); return; }
             var conn = LibraryConnection.Parse(setup.Report.Result);
-            connectedFolder = conn.Folder; libraryId = conn.Id; libraryFolder = connectedFolder;
+            connectedFolder = conn.Folder; libraryId = conn.Id; libraryFolder = connectedFolder; libraryFailure = "";
+            if (rememberLibrary)
+            {
+                rememberLibrary = false;
+                try { File.WriteAllText(LibraryPreference, connectedFolder); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { libraryDiagnostics += "\n" + error.Message; }
+            }
             var listing = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "catalog", null, cancellation.Token);
             DisplayJob(listing);
             if (listing.Report.Succeeded)
@@ -233,10 +248,10 @@ public sealed partial class EnvironmentWindow
             next();
         }
         catch (LibraryProtocolException error)
-        { librarySummary = "library.invalid_result"; libraryDiagnostics += "\n" + error.Message; importError = error.Message; }
+        { librarySummary = "library.invalid_result"; libraryDiagnostics += "\n" + error.Message; importError = libraryFailure = LibraryFailed(folder, error.Message); }
         catch (OperationCanceledException) { librarySummary = "library.interrupted"; }
         catch (Exception error)   // 玩家输入驱动的连接 / 创建：任何异常都报出来、不逃出去（玩家反馈：点「连接或创建游戏库」闪退）
-        { librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.Message; importError = error.Message; }
+        { librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.Message; importError = libraryFailure = LibraryFailed(folder, error.Message); }
         finally { libraryCancellation = null; libraryBusy = false; Render(); }
     }
 
@@ -340,4 +355,7 @@ public sealed partial class EnvironmentWindow
         panel.Children.Add(pcButtons);
         return panel;
     }
+
+    private string LibraryFailed(string folder, string reason) =>
+        T("welcome.sheet.libraryFailed").Replace("{0}", folder).Replace("{1}", reason.Length > 0 ? reason : T("library.failed"));
 }

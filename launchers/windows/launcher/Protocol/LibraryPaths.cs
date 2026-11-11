@@ -10,6 +10,31 @@ namespace S2Arm.Launcher.Protocol;
 /// </summary>
 public static class LibraryPaths
 {
+    // 系统自动生成的文件（同作业层 layout.OS_JUNK / 前端 LibraryPage.IsOsJunk）：判空文件夹时不算数
+    private static readonly HashSet<string> OsJunk = new(StringComparer.OrdinalIgnoreCase) { ".DS_Store", "desktop.ini", "Thumbs.db" };
+
+    /// <summary>这个文件夹建不了游戏库（作业层 setup 会拒收「已有别的文件」）：存在、没有游戏库标识、也不像旧游戏库（catalog.json / iPhone\，同 library._looks_like_library），
+    /// 里面有系统文件以外的东西。玩家把 S2Arm 的 zip 解压到了 %USERPROFILE%\S2Arm 就是这种（缺省库同名同位置，v0.2.8 热修）。</summary>
+    public static bool Occupied(string folder)
+    {
+        if (!Directory.Exists(folder) || File.Exists(Path.Combine(folder, ".s2arm-library.json")) || File.Exists(Path.Combine(folder, "catalog.json"))
+            || Directory.Exists(Path.Combine(folder, "iPhone"))) return false;
+        try { return Directory.EnumerateFileSystemEntries(folder).Select(Path.GetFileName).Any(n => n is not null && !OsJunk.Contains(n) && !n.StartsWith("._", StringComparison.Ordinal)); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }   // 读不了交给作业层报真实原因
+    }
+
+    /// <summary>缺省库位置被占（Occupied）时换到旁边：「S2Arm Library」「S2Arm Library 2」…；都被占就原样返回（由作业层报原因）。</summary>
+    public static string FreeDefaultLibrary(string folder)
+    {
+        if (!Occupied(folder)) return folder;
+        foreach (var n in Enumerable.Range(1, 9))
+        {
+            var next = folder + " Library" + (n == 1 ? "" : " " + n);
+            if (!Occupied(next)) return next;
+        }
+        return folder;
+    }
+
     /// <summary>设置：玩家选的库路径（一行文字）。</summary>
     public static string PreferenceFile(string privateRoot) => Path.Combine(privateRoot, "library-location.txt");
 

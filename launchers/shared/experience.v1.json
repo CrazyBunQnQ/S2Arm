@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "contract": "s2a.experience.v1",
-  "revision": 48,
+  "revision": 49,
   "languages": ["zh-Hans", "en"],
   "source_language": "zh-Hans",
   "note": "四端（Mac / iOS / Android / 鸿蒙）启动器的「一套体验」规格。状态、文案、错误码、任务事件到界面的映射只在这里定义一次；各端只负责画，不另写一套措辞。错误码的「下一步」不在本文件里写第二份：一律指向 pack/jobs/errors.py 的 RECOVERY（口径见 README.md）。口径号 revision 改动规则见 README.md。",
@@ -959,6 +959,9 @@
       {"id": "environment.ai.title", "zh-Hans": "允许 AI 操作 S2Arm", "en": "Let AI operate S2Arm"},
       {"id": "environment.ai.detail", "zh-Hans": "打开后，你自己的 AI 助手可以在这台电脑上替你操作启动器，每一步都显示在窗口里。", "en": "When on, your own AI assistant can operate the launcher on this PC, with every step shown in this window."},
       {"id": "welcome.sheet.dropUnreadable", "zh-Hans": "没有读到可用的文件，请点上面的按钮选择。", "en": "No usable file was received. Use the button above to choose one."},
+      {"id": "welcome.sheet.libraryFailed", "zh-Hans": "游戏库没建好（{0}）：{1}", "en": "The game library isn't set up ({0}): {1}"},
+      {"id": "welcome.sheet.libraryRetry", "zh-Hans": "重试", "en": "Try again"},
+      {"id": "welcome.sheet.libraryChange", "zh-Hans": "换个位置", "en": "Choose another folder"},
       {"id": "welcome.sheet.dropBusy", "zh-Hans": "现在还有任务在进行，等它完成后再添加。", "en": "Another task is still running. Add this when it finishes."},
       {"id": "welcome.sheet.result.none", "zh-Hans": "没有导入文件", "en": "No files imported"},
       {"id": "welcome.sheet.result.one", "zh-Hans": "已导入 1 个文件", "en": "1 file imported"},
