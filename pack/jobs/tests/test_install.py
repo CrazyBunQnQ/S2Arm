@@ -1181,6 +1181,18 @@ class PhoneGamesTruthTests(unittest.TestCase):
                 install.phone_games(self.c, self.ph(missing=False))                    # 装着却进不去 = 锁屏 / 断开
         self.assertEqual(e.exception.code, "device_locked")
 
+    def test_games_folder_not_created_yet_is_zero_games(self):
+        """首次装机：App 在、还没有 Documents/games——当 0 款照常装（v0.2.8 热修，玩家实机原文「afc error: Object not found」带空格，原先被当读不出设备挡住）。
+        新工具给结构化码 S2A_AFC_ERR 8；旧工具 / devicectl 只有原文，带不带空格、大小写都认。别的 AFC 错误码（如 4 读错误）与锁屏 / 断连照旧停"""
+        for out in ("S2A_AFC_ERR 8 Object not found", "afc error: Object not found", "ObjectNotFound", "No such file or directory", "OBJECT NOT FOUND"):
+            with self.subTest(out=out), um.patch.object(install, "devpush_client", self.client([], set(), ls_error=out)):
+                self.assertEqual(install.phone_games(self.c, self.ph()), set())
+        for out in ("S2A_AFC_ERR 4 Read error", "device socket io failed"):
+            with self.subTest(out=out), um.patch.object(install, "devpush_client", self.client([], set(), ls_error=out)):
+                with self.assertRaises(Failure) as e:
+                    install.phone_games(self.c, self.ph())
+                self.assertEqual(e.exception.code, "device_locked")
+
     def test_name_read_from_phone_with_the_bundle_being_installed(self):
         # Windows 第一次装（这台还没记录包名）：确认框里的名字照样按这次要装的包名去手机上读 control.nacp（Windows 实机曾显示成游戏号）
         seen = []

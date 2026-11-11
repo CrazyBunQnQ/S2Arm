@@ -360,7 +360,13 @@ async fn run(a: &[String]) -> Result<(), String> {
             let i = afc.get_device_info().await.map_err(|e| e.to_string())?; println!("{}", i.free_bytes);
         }
         "ls" => {
-            for n in afc.list_dir(a[4].trim_start_matches('/').to_string()).await.map_err(|e| e.to_string())? { println!("{n}"); }
+            // 列不出时带 AFC 结构化错误码「S2A_AFC_ERR <码>」（8 = 目录不存在），调用方按码判「App 在、目录还没建」与「锁屏 / 断连」，
+            //   不再匹配英文原文（玩家实机原文「afc error: Object not found」带空格，按 ObjectNotFound 匹配不上，首次装机被挡，v0.2.8 热修）
+            match afc.list_dir(a[4].trim_start_matches('/').to_string()).await {
+                Ok(names) => for n in names { println!("{n}"); },
+                Err(idevice::IdeviceError::Afc(code)) => return Err(format!("S2A_AFC_ERR {} {code}", code.sub_code())),
+                Err(e) => return Err(e.to_string()),
+            }
         }
         _ => return Err(format!("不认识的操作 {op}")),
     }

@@ -1069,6 +1069,17 @@ def phone_for(c):
 
 
 GID_RE = re.compile(r"[0-9A-F]{16}")
+# 机上目录不存在：s2a-devpush ls 的结构化错误码 S2A_AFC_ERR 8（AFC ObjectNotFound）；旧工具 / devicectl 只有原文，兜底认
+#   「No such file」与「Object not found / ObjectNotFound」（带不带空格、大小写都认）。玩家实机（Windows 0.2.7、iOS 27.0.1）原文是
+#   「afc error: Object not found」，原先只认 ObjectNotFound，首次装机（App 在、还没有 Documents/games）被当成读不出设备挡住（v0.2.8 热修）
+AFC_NOT_FOUND = 8
+
+
+def dir_missing(out):
+    m = re.search(r"S2A_AFC_ERR (\d+)", out or "")
+    if m:
+        return int(m.group(1)) == AFC_NOT_FOUND
+    return bool(re.search(r"no such file|object\s*not\s*found", out or "", re.I))
 
 
 def phone_bid(ph):
@@ -1088,7 +1099,7 @@ def phone_games(c, ph):
         cl = devpush_client(c, ph.udid, bid, w)
         rc, out = cl.call("ls", "Documents/games")
         if rc:
-            if "No such file" in out or "ObjectNotFound" in out:   # App 在、还没装过任何一款
+            if dir_missing(out):   # App 在、还没装过任何一款（Documents/games 还没建）：当 0 款，装机照常（推资源包时自会建目录）
                 return set()
             if ph.app_missing(bid, out):
                 return None
