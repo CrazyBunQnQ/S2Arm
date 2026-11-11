@@ -76,6 +76,8 @@ public sealed partial class EnvironmentWindow
     // A checklist that could not be read must not lock the player out: start and let the install job give the real reason.
     private bool InstallAllowed => readiness?.Ready == true || (readiness is null && installCheckFailed);
     private string installState = "", installMessage = "", installDiagnostics = "";
+    /// <summary>上一次装机失败的错误码（apple_session_expired 时失败页给「打开 Impactor 重新登录」，重新登录完自动再装）</summary>
+    private string? installCode;
     private string revealProblem = "";   // 「显示 IPA」「打开游戏文件夹」找不到目标时的提示（不打开空的资源管理器）
     // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
     //   installSeen：跑完后玩家回安装页看过结果没有；没看过时顶栏胶囊一直在。进度计数来自作业事件 done / total / unit（推资源包按字节，机上解包按包）
@@ -1177,6 +1179,13 @@ public sealed partial class EnvironmentWindow
                 if (PhoneProgressText() is { Length: > 0 } progress) state.Children.Add(Muted(progress));
             }
             if (installMessage.Length > 0) state.Children.Add(Muted(installMessage));
+            if (installState is "failed" && installCode == "apple_session_expired")
+            {
+                // Apple ID 登录过期（Apple 1100）：打开 Impactor 让玩家自己重新登录（密码不经手），登录好再点一次「装到 iPhone」（上面的说明写了步骤）
+                var relogin = Action("install.relogin", OpenBundledImpactor, File.Exists(BundledImpactor) && !installBusy);
+                AutomationId(relogin, "install.relogin");
+                state.Children.Add(relogin);
+            }
             if (installState is "failed" or "invalid")
                 state.Children.Add(CopyReportButton(game.Id, ["install", "installRemove", "installRestore"], () => installMessage + "\n" + installDiagnostics));
             body.Children.Add(Card(state));
@@ -1218,6 +1227,7 @@ public sealed partial class EnvironmentWindow
         {
             var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, DropExtra(acceptDropped)), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
             if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            installCode = job.Report.Succeeded ? null : JobCode(job);
             installState = job.Report.State;
             installMessage = job.Report.Succeeded && job.Report.Result.TryGetProperty("device", out var device) && device.ValueKind == JsonValueKind.String
                 ? T("install.device") + " · " + device.GetString() : job.Report.Message;

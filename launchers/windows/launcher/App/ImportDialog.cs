@@ -91,6 +91,17 @@ public sealed partial class EnvironmentWindow
             copyError.Margin = new Thickness(0, 10, 0, 0); copyError.HorizontalAlignment = HorizontalAlignment.Left;
             panel.Children.Add(copyError);
         }
+        // 游戏库没连上（也没在连）：给两条路——按原位置重试、换一个文件夹（换了会记住）
+        if (!libraryBusy && !importBusy && (connectedFolder is null || libraryId is null))
+        {
+            var fix = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 10, 0, 0) };
+            var retry = Action("welcome.sheet.libraryRetry", () => EnsureLibrary(() => { }));
+            AutomationId(retry, "import.library.retry");
+            var change = Action("welcome.sheet.libraryChange", () => BeginPicker(ChangeLibraryAsync));
+            AutomationId(change, "import.library.change");
+            fix.Children.Add(retry); fix.Children.Add(change);
+            panel.Children.Add(fix);
+        }
 
         var footer = new StackPanel { Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0), Spacing = 8 };
@@ -199,7 +210,10 @@ public sealed partial class EnvironmentWindow
     private void AcceptImport(string[] paths, ImportKind kind)
     {
         if (importBusy) return;
-        if (connectedFolder is null || libraryId is null) { importError = T("welcome.sheet.dropBusy"); Render(); return; }
+        // 只有真的在建库 / 连库时才说「有任务在进行」；没连上就说没连上的真实原因（下面有「重试 / 换个位置」），v0.2.8 热修：
+        //   原先没连上一律报 dropBusy，缺省库建不起来的原因被盖掉，玩家一直卡在「还有任务在进行」
+        if (libraryBusy) { importError = T("welcome.sheet.dropBusy"); Render(); return; }
+        if (connectedFolder is null || libraryId is null) { importError = libraryFailure.Length > 0 ? libraryFailure : LibraryFailed(libraryFolder, ""); Render(); return; }
         if (kind == ImportKind.Keys)
             _ = RunImportKeysAsync(paths[0]);
         else

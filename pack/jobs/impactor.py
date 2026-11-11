@@ -58,6 +58,9 @@ def selected_team(appdata=None):
 # Impactor / 侧载工具界面上的报错原文 → 共用错误码（顺序即优先级；处理办法在 pack/jobs/errors.py RECOVERY）
 EXPLAIN = (
     (r'-80046', 'login_identity_rejected'),
+    # 保存的 Apple ID 会话过期（Apple 开发者接口 1100「Your session has expired. Please log in.」，plumesign 恢复会话时报，玩家反馈 v0.2.7）：
+    #   要在 Impactor 里重新登录；原先落到 device_install_failed，建议写「检查设备连接与包的有效性」，把玩家往错的方向引
+    (r'developer api error 1100\b|\b1100\b[^\n]{0,40}session|session has expired|please log ?in again|not logged in', 'apple_session_expired'),
     (r'-2097\d|-20101|incorrect|entered incorrectly', 'apple_id_wrong'),
     (r'-21669|verification code|two.?factor|2fa', 'two_factor_wrong'),
     (r'unknown error occured while reading the file|unknown error occurred while reading the file|zip64', 'ipa_needs_repack'),
