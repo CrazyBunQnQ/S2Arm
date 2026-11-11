@@ -1079,18 +1079,18 @@ public class MainActivity extends Activity
         java.util.List<String> labels = new java.util.ArrayList<>();
         java.util.List<Runnable> actions = new java.util.ArrayList<>();
         if (touchPad.getVisibility() == android.view.View.VISIBLE) {
-            labels.add("Edit button positions"); actions.add(this::beginTouchEdit);
+            labels.add(getString(R.string.touch_menu_edit)); actions.add(this::beginTouchEdit);
         }
         if (touchLayouts.file().isFile()) {
-            labels.add("Restore default layout"); actions.add(this::resetTouchLayout);
+            labels.add(getString(R.string.touch_menu_reset)); actions.add(this::resetTouchLayout);
         }
         if (host != 0 && BuildConfig.EXPERIMENTAL_TOUCH) {   // not built in: no item that can only fail
             boolean on = touchPad.gameTouchEnabled();
-            labels.add(on ? "Touch passthrough: on (tap to turn off)" : "Touch passthrough: off (tap to turn on)");
+            labels.add(getString(on ? R.string.touch_passthrough_on : R.string.touch_passthrough_off));
             actions.add(() -> setTouchPassthrough(!on, true));
         }
         new android.app.AlertDialog.Builder(this)
-            .setTitle("Touch controls")
+            .setTitle(R.string.touch_menu_title)
             .setItems(labels.toArray(new String[0]), (dialog, which) -> actions.get(which).run())
             .setNegativeButton(android.R.string.cancel, null)
             .show();
@@ -1101,7 +1101,7 @@ public class MainActivity extends Activity
         touchEditBar = new LinearLayout(this);
         touchEditBar.setOrientation(LinearLayout.HORIZONTAL);
         touchEditBar.setBackgroundColor(0xE6101820);
-        String[] names = {"Save", "Default", "Cancel"};
+        int[] names = {R.string.touch_edit_save, R.string.touch_edit_default, R.string.touch_edit_cancel};
         Runnable[] actions = {this::saveTouchEdit, () -> { endTouchEdit(); resetTouchLayout(); }, () -> { endTouchEdit(); loadTouchLayout(); }};
         for (int i = 0; i < names.length; i++) {
             android.widget.Button button = new android.widget.Button(this);

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="touch_menu_title">触屏控制</string>
+    <string name="touch_menu_edit">编辑按键位置</string>
+    <string name="touch_menu_reset">恢复默认布局</string>
+    <string name="touch_passthrough_on">触摸透传：已开启（点按关闭）</string>
+    <string name="touch_passthrough_off">触摸透传：已关闭（点按开启）</string>
+    <string name="touch_edit_save">保存</string>
+    <string name="touch_edit_default">默认</string>
+    <string name="touch_edit_cancel">取消</string>
+</resources>

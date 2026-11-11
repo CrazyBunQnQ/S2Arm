@@ -253,6 +253,7 @@ s2a_gate_step javac -encoding UTF-8 -d "$out/java" \
     "$android_dir/tests/BootContractTest.java"
 s2a_gate_step java -cp "$out/java" org.s2arm.android.BootContractTest
 # B6-1 F01 data/editor model: reads the existing iOS reference; no SDK or device evidence.
+s2a_gate_step "$PY" "$android_dir/tests/touch_menu_resources_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/touch_layout_model_test.py"
 s2a_gate_step javac -encoding UTF-8 -d "$out/java" -cp "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/BootSpec.java" \

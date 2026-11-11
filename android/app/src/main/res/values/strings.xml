@@ -7,5 +7,13 @@
     <string name="native_unavailable">The native host could not start. See the S2Arm log for details.</string>
     <string name="capability_status">%1$s\n%2$s</string>
     <string name="import_game">Import game package…</string>
+    <string name="touch_menu_title">Touch controls</string>
+    <string name="touch_menu_edit">Edit button positions</string>
+    <string name="touch_menu_reset">Restore default layout</string>
+    <string name="touch_passthrough_on">Touch passthrough: on (tap to turn off)</string>
+    <string name="touch_passthrough_off">Touch passthrough: off (tap to turn on)</string>
+    <string name="touch_edit_save">Save</string>
+    <string name="touch_edit_default">Default</string>
+    <string name="touch_edit_cancel">Cancel</string>
 </resources>
 
