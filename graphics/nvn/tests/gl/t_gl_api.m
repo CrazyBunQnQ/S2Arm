@@ -783,6 +783,10 @@ static void t_core_stub(void) {
     CHECK(core && ((uint64_t (*)(void))core)() == 0, "调用空实现不崩、回 0");
     CHECK(core == gpa("glS2aNoSuchCore"), "同名再查拿到同一个空实现");
     CHECK(ext == NULL, "带厂商后缀的没实现照旧回空（程序按指针判扩展支持）");
+    // #601：「gl」后跟小写的不是 GL 函数（NVN GLSL 编译库 glslc*，由游戏模块导出）——必须回空，装载器才会去游戏模块找
+    { static const char *const glslc[] = {"glslcInitialize", "glslcSetAllocator", "glslcCompile", "glslcFinalize", "glslcGetVersion", "glslcCompilePreSpecialized"};
+      int nonnull = 0; for (int i = 0; i < 6; i++) nonnull += gpa(glslc[i]) != NULL;
+      CHECK(nonnull == 0, "glslc* 六个名字全部回空（交给游戏模块），拿到非空 %d 个", nonnull); }
     // 小丑牌 v0.2.7 起局查了 854 个没实现的核心名：1000 个不同名字都要拿到各自的空实现（以前 256 个用完就回空、照样跳 0）
     int got = 0, distinct = 1; void *prev = NULL; char nm[40];
     for (int i = 0; i < 1000; i++) { snprintf(nm, sizeof nm, "glS2aMissCore%dxyz", i); void *f = gpa(nm); got += f != NULL; if (f && f == prev) distinct = 0; prev = f; }

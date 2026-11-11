@@ -58,9 +58,12 @@ __attribute__((used)) static const char *const gl_slices[] = {&gl_slice_egl, &gl
 // 核心函数（名字结尾不是两个以上大写字母的厂商后缀 ARB / EXT / NV …）没实现时不回空：游戏按报的 GL 版本直接调，拿到空指针就跳到 0、
 //   iOS 当场按代码签名杀掉（小丑牌 v0.2.6 玩家 iPhone 5 次起局都这样）。交一个预编好的空实现：第一次调用打红点名、回 0，
 //   日志直接看出游戏用了哪个，再给真实现。扩展函数照旧回空（GL 允许取不到，程序常按指针判支持）
+// 核心名 = 「gl」紧跟大写字母（glBindTexture …）且结尾不是两个以上大写的厂商后缀。「gl」后跟小写的不是 GL 函数：NVN 的 GLSL 编译库
+//   glslcInitialize / glslcSetAllocator / glslcCompile … 由游戏自己的模块导出，装载器只在这里回空时才去游戏模块找——交了空实现，游戏拿到的是什么都不做的
+//   函数，首帧前就退出（#601：0100C87006310000，v0.2.8 回归，978191cd 只看「gl」前缀）
 static int gl_core_name(const char *n) {
     size_t l = strlen(n), u = 0; while (u < l && n[l - 1 - u] >= 'A' && n[l - 1 - u] <= 'Z') u++;
-    return u < 2 && !strncmp(n, "gl", 2);
+    return u < 2 && !strncmp(n, "gl", 2) && n[2] >= 'A' && n[2] <= 'Z';
 }
 // 空实现个数 = GL_MISS_N（4096）：GL 4.6 兼容档的全部核心名约 2000+，LÖVE / glad 起局一次查一千多个（小丑牌 v0.2.7：没实现的核心名 854 个），
 //   256 个时用完就退回空、照样跳 0。每个空实现是一条带编号的小函数（第一次调用按编号点名），编号用十六进制三位拼出来：gl_miss_abc ↔ 0xabc
