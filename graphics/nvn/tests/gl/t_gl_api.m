@@ -268,8 +268,8 @@ static void t_fb_query(void) {
 // ---------- E 体纹理 ----------
 static void t_volume(void) {
     printf("E 体纹理（2D 数组 / 3D）\n");
-    G(glTexImage3D, void, GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)
-    G(glTexSubImage3D, void, GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *)
+    G(glTexImage3D, void, GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, uint64_t, const void *)   // 栈上参数按游戏的 8 字节一格
+    G(glTexSubImage3D, void, GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, uint64_t, uint64_t, const void *)   // 栈上参数按游戏的 8 字节一格（gl_tex.m 注释）
     G(glGetTexImage, void, GLenum, GLint, GLenum, GLenum, void *)
     GLuint prog = program("api_vol"), fb = fbo_rb(8, 8, NULL); glUseProgram(prog);
     GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao); glGenBuffers(1, &vbo); glBindBuffer(0x8892, vbo);
@@ -798,8 +798,8 @@ static void t_core_stub(void) {
 // LÖVE 11 起局 createDefaultTexture：3D 与 2D 数组各建 1×1 不可变存储、子图写一个白像素（小丑牌 v0.2.7 崩在这里：glTexStorage3D 以前回空）
 static void t_tex_storage3d(void) {
     void (*st3)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei) = gpa("glTexStorage3D");
-    void (*sub3)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *) = gpa("glTexSubImage3D");
-    void (*img3)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = gpa("glTexImage3D");
+    void (*sub3)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, uint64_t, uint64_t, const void *) = gpa("glTexSubImage3D");
+    void (*img3)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, uint64_t, const void *) = gpa("glTexImage3D");
     void (*getimg)(GLenum, GLint, GLenum, GLenum, void *) = gpa("glGetTexImage"); void (*gtpi)(GLenum, GLenum, GLint *) = gpa("glGetTexParameteriv");
     if (!st3 || !sub3 || !img3 || !getimg) return;
     while (glGetError()) {}
@@ -813,6 +813,11 @@ static void t_tex_storage3d(void) {
               i ? "2D 数组" : "3D", e0, e1, e2, out[0], out[1], out[2], out[3], lv);
         st3(tg[i], 1, 0x8058, 1, 1, 1); GLenum e3 = glGetError(); img3(tg[i], 0, 0x8058, 1, 1, 1, 0, 0x1908, 0x1401, white); GLenum e4 = glGetError();
         CHECK(e3 == 0x502 && e4 == 0x502, "%s 不可变后再 TexStorage3D / TexImage3D 都报 INVALID_OPERATION（%#x %#x）", i ? "2D 数组" : "3D", e3, e4);
+    }
+    {   // 游戏按 8 字节一格放栈上参数、高 32 位是脏的（小丑牌实测 type 读成 0x70）：宿主只取低 32 位
+        GLuint tg9; glGenTextures(1, &tg9); glBindTexture(0x806F, tg9); st3(0x806F, 1, 0x8058, 1, 1, 1); while (glGetError()) {}
+        sub3(0x806F, 0, 0, 0, 0, 1, 1, 1, 0x0000007000001908ull, 0x0000007000001401ull, white); GLenum eg = glGetError(); memset(out, 0, sizeof out); getimg(0x806F, 0, 0x1908, 0x1401, out);
+        CHECK(!eg && !memcmp(out, white, 4), "glTexSubImage3D 栈上 format / type 高 32 位脏：只取低位、写入无错、读回白（错 %#x，读回 %d %d %d %d）", eg, out[0], out[1], out[2], out[3]);
     }
     GLuint t3; glGenTextures(1, &t3); glBindTexture(0x806F, t3); st3(0x806F, 3, 0x8058, 4, 4, 2); GLenum e5 = glGetError();
     uint8_t px[4 * 4 * 2 * 4]; memset(px, 0x40, sizeof px); sub3(0x806F, 2, 0, 0, 0, 1, 1, 1, 0x1908, 0x1401, white); GLenum e6 = glGetError();

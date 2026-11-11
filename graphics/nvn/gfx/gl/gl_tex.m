@@ -727,7 +727,8 @@ static gl_texture *bound_vol(GLenum target, const char *fn) {
     int slot = gl_tex_slot(target); if (slot != 2 && slot != 3) { unsupported(fn, target); return NULL; }
     return bound_slot(slot);
 }
-GLB(glTexImage3D, void, GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format, GLenum type, const void *data) { @autoreleasepool {
+GLB(glTexImage3D, void, GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format, uint64_t type64, const void *data) { @autoreleasepool {   // type 在栈上：按游戏的 8 字节一格读（见下 glTexSubImage3D）
+    GLenum type = (GLenum)type64;
     CTX(); gl_texture *t = bound_vol(target, "glTexImage3D 目标"); if (!t) return;
     if (t->immutable) { gl_set_error(GL_INVALID_OPERATION); return; }
     int is3d = target == GL_TEXTURE_3D, max_wh = is3d ? 2048 : 16384;   // MAX_3D_TEXTURE_SIZE 2048（Metal 3D 上限）、MAX_ARRAY_TEXTURE_LAYERS 2048
@@ -745,7 +746,11 @@ GLB(glTexImage3D, void, GLenum target, GLint level, GLint internal, GLsizei w, G
         if (!upload(image, f, is3d ? 0 : (NSUInteger)z, is3d ? (NSUInteger)z : 0, 0, 0, w, h, format, type, (const uint8_t *)data + (size_t)z * step, is_rgb_internal(internal))) return;
     t->level[0][level].image = image; t->level[0][level].format = sized_format((GLenum)internal); t->level[0][level].fmt = f; sample_drop(t);
 }}
-GLB(glTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type, const void *data) { @autoreleasepool {
+// 第 9–11 个参数在栈上（同 gl_fb.m glBlitFramebuffer）：Switch 标准 AAPCS64 每个栈参数占 8 字节一格（format sp+0、type sp+8、data sp+16），
+//   Apple ARM64 把 32 位栈参数紧挨着排（format sp+0、type sp+4、data sp+8）。照 32 位声明，宿主把 format 那格的高 32 位当 type、把 type 那格当 data 指针读
+//   （小丑牌 / LÖVE 11 起局给 3D、2D 数组默认纹理写白：type 读成垃圾 0x70 → GL_INVALID_ENUM → LÖVE 查到 GL 错误抛异常、游戏退出）。声明成 64 位按 8 字节一格读
+GLB(glTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format64, uint64_t type64, const void *data) { @autoreleasepool {
+    GLenum format = (GLenum)format64, type = (GLenum)type64;
     CTX(); gl_texture *t = bound_vol(target, "glTexSubImage3D 目标"); if (!t) return;
     if (level < 0 || level >= TEX_LEVELS) { gl_set_error(GL_INVALID_VALUE); return; }
     tex_level *lv = &t->level[0][level]; id<MTLTexture> old = lv->image; if (!old) { gl_set_error(GL_INVALID_OPERATION); return; }
