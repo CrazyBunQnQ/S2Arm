@@ -794,6 +794,9 @@ static void t_core_stub(void) {
     while (glGetError()) {}
     GLboolean a = isen(0x8DB9); GLenum e0 = glGetError(); en(0x8DB9); GLboolean b = isen(0x8DB9); GLenum e1 = glGetError(); dis(0x8DB9); GLboolean c = isen(0x8DB9); GLenum e2 = glGetError();
     CHECK(!a && b && !c && !e0 && !e1 && !e2, "GL_FRAMEBUFFER_SRGB：缺省关 / 开后查得开 / 关后查得关，全程无错（%d %d %d，错 %#x %#x %#x）", a, b, c, e0, e1, e2);
+    for (int k = 0; k < 2; k++) { GLenum cap = k ? 0x8242 : 0x92E0;   // GL_DEBUG_OUTPUT / _SYNCHRONOUS：只记开关、不报错（小丑牌 glDisable(GL_DEBUG_OUTPUT)）
+        dis(cap); GLboolean x = isen(cap); GLenum f0 = glGetError(); en(cap); GLboolean y = isen(cap); GLenum f1 = glGetError(); dis(cap); GLenum f2 = glGetError();
+        CHECK(!x && y && !f0 && !f1 && !f2, "%s：关后查得关 / 开后查得开，全程无错（%d %d，错 %#x %#x %#x）", k ? "GL_DEBUG_OUTPUT_SYNCHRONOUS" : "GL_DEBUG_OUTPUT", x, y, f0, f1, f2); }
 }
 // LÖVE 11 起局 createDefaultTexture：3D 与 2D 数组各建 1×1 不可变存储、子图写一个白像素（小丑牌 v0.2.7 崩在这里：glTexStorage3D 以前回空）
 static void t_tex_storage3d(void) {
@@ -852,6 +855,25 @@ static void t_tex_swizzle(void) {
     CHECK(e1 == 0x500 && e2 == 0x500, "采样器对象设换位 / 非法取值 → INVALID_ENUM（%#x %#x）", e1, e2);
     glBindTexture(0x0DE1, 0);
 }
+// bool uniform（小丑牌 / LÖVE：着色器头 #define extern uniform，Balatro 写 extern bool；SPIR-V 默认块里 bool 换成 uint，反射报 GL_UNSIGNED_INT 时
+//   LÖVE Shader:send 拒收布尔值、Lua 报错退出）。期望：类型报 GL_BOOL / GL_BOOL_VEC2；uFlag=1 → 绿，uPair=(0,1) → 蓝分量满 → (0,255,255)；uFlag=0、uPair=0 → 红
+static void t_bool_uniform(void) {
+    printf("S3 bool uniform\n");
+    G(glGetActiveUniform, void, GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, GLchar *) G(glUniform2iv, void, GLint, GLsizei, const GLint *)
+    GLuint prog = program("api_bool"), fb = fbo_rb(8, 8, NULL); (void)fb; glUseProgram(prog); glViewport(0, 0, 8, 8);
+    GLenum tf = 0, tp = 0; GLint sz; char nm[64];
+    GLint n = 0; glGetProgramiv(prog, 0x8B86, &n);
+    for (GLint i = 0; i < n; i++) { GLenum t = 0; glGetActiveUniform(prog, (GLuint)i, sizeof nm, NULL, &sz, &t, nm); if (!strcmp(nm, "uFlag")) tf = t; if (!strcmp(nm, "uPair")) tp = t; }
+    CHECK(tf == 0x8B56 && tp == 0x8B57, "extern bool / bvec2 的类型报 GL_BOOL / GL_BOOL_VEC2（%#x %#x）", tf, tp);
+    GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao); glGenBuffers(1, &vbo); glBindBuffer(0x8892, vbo);
+    const float quad[] = {-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1}; glBufferData(0x8892, sizeof quad, quad, 0x88E4);
+    GLint ap = glGetAttribLocation(prog, "aPos"); glVertexAttribPointer((GLuint)ap, 2, 0x1406, 0, 8, 0); glEnableVertexAttribArray((GLuint)ap);
+    GLint lf = glGetUniformLocation(prog, "uFlag"), lp = glGetUniformLocation(prog, "uPair"); char s[32];
+    glUniform1i(lf, 1); const GLint p01[2] = {0, 1}, p00[2] = {0, 0}; glUniform2iv(lp, 1, p01); glDrawArrays(4, 0, 6); glFinish(); pxs(4, 4, s);
+    CHECK(px_is(4, 4, 0, 255, 255, 255) && !glGetError(), "uFlag=1、uPair=(0,1) → (0,255,255)（%s）", s);
+    glUniform1i(lf, 0); glUniform2iv(lp, 1, p00); glDrawArrays(4, 0, 6); glFinish(); pxs(4, 4, s);
+    CHECK(px_is(4, 4, 255, 0, 0, 255) && !glGetError(), "uFlag=0、uPair=(0,0) → 红（%s）", s);
+}
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }
     BASE(LOAD)
@@ -865,6 +887,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_bool_uniform(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}

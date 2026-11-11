@@ -37,10 +37,13 @@ void gl_names_clear(gl_names *t, void (*destroy)(void *)) {
 // ---------- 错误 ----------
 #undef gl_set_error
 void gl_set_error(GLenum e) { if (gl_cur && !gl_cur->error) gl_cur->error = e; }
+// S2A_GL_ERR_OFF=1（只给诊断局用）：错误照常打日志，但不交给游戏。游戏（如 LÖVE）读到第一个 GL 错误就抛异常退出，后面的缺口永远看不到；
+//   关掉后一局就能把所有没实现的入口 / 参数一次列全（11-11 小丑牌：栈参数、纹理换位一个修完才露下一个）。缺省关，关路径只读一次缓存的开关
 void gl_set_error_at(GLenum e, const char *fn) {
-    if (!gl_cur || gl_cur->error) return;
-    gl_cur->error = e;
-    static _Atomic int n; if (atomic_fetch_add(&n, 1) < 32) GLOG("GL 错误 %#x 由 %s 置（游戏 glGetError 会读到）", e, fn ? fn : "?");
+    static int off = -1; if (off < 0) { const char *v = getenv("S2A_GL_ERR_OFF"); off = v && *v == '1'; if (off) GLOG("【黄】 诊断：S2A_GL_ERR_OFF=1，GL 错误只记日志、不交给游戏"); }
+    if (!gl_cur || (gl_cur->error && !off)) return;
+    if (!off) gl_cur->error = e;
+    static _Atomic int n; if (atomic_fetch_add(&n, 1) < (off ? 4096 : 32)) GLOG("GL 错误 %#x 由 %s 置（%s）", e, fn ? fn : "?", off ? "诊断：没交给游戏" : "游戏 glGetError 会读到");
 }
 GL(glGetError, GLenum, void) { if (!gl_cur) return 0; GLenum e = gl_cur->error; gl_cur->error = 0; return e; }
 
