@@ -1,11 +1,14 @@
 #!/bin/bash
-# 发布包签名 + 公证 + 钉票据（维护方内部文档，发布步骤）。原地处理 build_app.py 打出的 S2Arm.app，结束后同目录出 S2Arm.zip。
+# 发布包签名 + 公证 + 钉票据（维护方内部文档，发布步骤）。原地处理 build_app.py 打出的 S2Arm.app，
+# 结束后同目录出最终发行产物 S2Arm-mac-arm64.dmg（过程 zip 只用于 notarytool 提交，通过后删除）。
 # 为什么：ad-hoc 签名的身份就是本版内容哈希，玩家每升级一版系统都当新 App，「可移动卷宗 / 下载 / 桌面」等文件访问授权全部重弹；
 #   Developer ID 签名的身份 = 团队号 + 包名，跨版本不变。公证后玩家首次打开也不用再去「隐私与安全性」里放行。
 # 公证要求包里每个 Mach-O 都用 Developer ID + 强化运行时 + 时间戳签：由里到外逐个签，再签嵌套 .app，最后签整包。
 #   强化运行时的授权项（release.entitlements）放宽到与 ad-hoc 时等效：.NET 要 JIT、游戏宿主要可写可执行内存、各运行库互相加载不校验签名者。
 # 环境：S2A_SIGN_KEYCHAIN 放证书的钥匙串；S2A_SIGN_KEYCHAIN_PASS_FILE 钥匙串口令文件（只从文件读，不打印、不进日志）；
 #       ASC_KEY_ID / ASC_ISSUER / ASC_KEY_PATH App Store Connect 接口密钥（公证用）。S2A_NOTARIZE=0 只签不公证。
+#       S2A_DMG_PYTHON 可选：装有 DMG 打包依赖的解释器（缺省用 build/dmg-venv/bin/python，
+#       没有则用 S2A_PYTHON 或 python3；准备命令见 DMG 准备段与 README）。
 set -euo pipefail
 APP=$(cd "$1" && pwd); HERE=$(cd "$(dirname "$0")" && pwd); ENT=$HERE/release.entitlements; KC=${S2A_SIGN_KEYCHAIN:?请设 S2A_SIGN_KEYCHAIN}
 if [ -n "${S2A_SIGN_KEYCHAIN_PASS_FILE:-}" ]; then security unlock-keychain -p "$(cat "$S2A_SIGN_KEYCHAIN_PASS_FILE")" "$KC"; fi
@@ -66,18 +69,30 @@ PY
 python3 -I "$HERE/../../pack/shell/manifest.py" verify --root "$APP/Contents/Resources/Shell/root" --manifest "$APP/Contents/Resources/Shell/manifest.json" > /dev/null || { echo "【红】壳清单与签名后的文件对不上" >&2; exit 3; }
 codesign -d -r- "$APP" 2>&1 | grep -q 'designated => .*certificate leaf' || { echo "【红】指定要求不是证书形式" >&2; exit 3; }
 echo "签名：$n 个 Mach-O + 整包，Developer ID，强化运行时，校验通过"
-Z=$(dirname "$APP")/S2Arm.zip; rm -f "$Z"
+DIR=$(dirname "$APP"); Z=$DIR/S2Arm.zip; DMG=$DIR/S2Arm-mac-arm64.dmg
+rm -f "$Z" "$DMG"
+# zip 只当 notarytool 的提交载体；公证 Accepted 并钉票据后立刻删除，最终发行产物只有 DMG。
 if [ "${S2A_NOTARIZE:-1}" != 0 ]; then
   ditto -c -k --keepParent "$APP" "$Z"
-  log=$(dirname "$APP")/notary.log
+  log=$DIR/notary.log
   xcrun notarytool submit "$Z" --key "${ASC_KEY_PATH:?}" --key-id "${ASC_KEY_ID:?}" --issuer "${ASC_ISSUER:?}" --wait > "$log" 2>&1 || true
   grep -q 'status: Accepted' "$log" || { echo "【红】公证没通过，见 ${log}（xcrun notarytool log <id> 看逐项原因）" >&2; exit 4; }
   xcrun stapler staple "$APP" > /dev/null
   rm -f "$Z"
-fi
-ditto -c -k --keepParent "$APP" "$Z"
-if [ "${S2A_NOTARIZE:-1}" != 0 ]; then
   spctl -a -vv -t exec "$APP" 2>&1 | sed -n 1,2p
   spctl -a -t exec "$APP" || { echo "【红】Gatekeeper 不认（spctl rejected）" >&2; exit 5; }
 fi
-shasum -a 256 "$Z"
+# 钉完票据后用同一个 App 出 DMG：build_dmg.py 校验布局/资产/App 签名后打包，
+# --check 挂载成品只读核对 App 签名、/Applications 符号链接、1×/2× 背景、.DS_Store 窗口 rect 与图标坐标。
+ROOT=$(cd "$HERE/../.." && pwd)
+DMG_PY=${S2A_DMG_PYTHON:-}
+if [ -z "$DMG_PY" ]; then
+  if [ -x "$ROOT/build/dmg-venv/bin/python" ]; then DMG_PY=$ROOT/build/dmg-venv/bin/python; else DMG_PY=${S2A_PYTHON:-python3}; fi
+fi
+"$DMG_PY" -I -c 'import dmgbuild, ds_store' 2>/dev/null || {
+  echo "【红】发版需要 DMG 打包依赖。准备命令：python3 -m venv build/dmg-venv && build/dmg-venv/bin/python -m pip install -r launchers/macos/requirements-dmg.txt（也可用 S2A_DMG_PYTHON 指定已装好 dmgbuild 与 ds_store 的解释器）" >&2
+  exit 6
+}
+"$DMG_PY" "$HERE/build_dmg.py" --app "$APP" --output "$DMG"
+"$DMG_PY" "$HERE/build_dmg.py" --check "$DMG"
+shasum -a 256 "$DMG"

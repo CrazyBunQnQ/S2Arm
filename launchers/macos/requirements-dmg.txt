@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
 # Maintainer-only installer tooling; not bundled in the application runtime.
+# dmgbuild 负责打包；ds-store 另外供 build_dmg.py --check 读取成品 DMG 的 .DS_Store；
+# mac-alias 是 dmgbuild 引用背景图别名所需。安装命令见 launchers/macos/README.md 的 DMG 一节。
 dmgbuild==1.6.7
 ds-store==1.3.3
 mac-alias==2.2.3

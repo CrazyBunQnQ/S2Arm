@@ -108,6 +108,21 @@ Finder 显示，S2Arm.app 可以实际拖入指向 `/Applications` 的快捷方�
 背景以 1× / 2× TIFF 输出，布局尺寸与图标位置统一读取
 [`Branding/dmg-layout.json`](Branding/dmg-layout.json)。
 
+字标使用站点同款透明底版本 `docs/images/s2arm-wordmark-transparent.png`
+（与 `Branding/wordmark-transparent.png` 字节相同）：旧的 opaque 版
+`docs/images/s2arm-wordmark.png` 没有 alpha，铺在近黑背景上会露出黑色圆角块接缝；
+旧图保留给其它引用，只切换 DMG 这一条。窗口 rect 的高度 = 背景高 + 32 点 Finder
+标题栏增量（同一 AppKit API 复测：titled 窗口 760×560 contentRect → frame 760×592）。
+
+打包入口在调用 Swift 渲染器之前先校验输入，所有错误都是中文、可照做、退出码 2：
+
+- `dmg-layout.json` 必须是合法 JSON；`width` / `height` / `iconSize` 必须是整数且在
+  `build_dmg.py` 的允许范围内；`iconPositions` 必须是对象、至少含 `S2Arm.app` 与
+  `Applications`，坐标是整数且让图标完整落在画布内；多余/缺失的键直接报出名字。
+- 字标、`Branding/AppIcon-1024.png` 与 Swift 渲染器必须存在且是有效 PNG。
+- Swift 渲染器同样不再用 `as!` / 强制解包：坏 JSON、缺字标、坏坐标都会打印中文错误并
+  `exit(2)`，不再 SIGTRAP / SIGABRT。
+
 只预览设计（需要 macOS 和 Swift，无需打包依赖或完整 App）：
 
 ```sh
@@ -117,19 +132,29 @@ python3 launchers/macos/build_dmg.py --preview build/macos/dmg-preview
 预览图为 `build/macos/dmg-preview/preview.png`，其中图标仅用于示意；
 实际背景 `background.tiff` 不含图标。传入 `--app <路径>/S2Arm.app` 可用该 App 的图标预览。
 
-正式打包使用已经完成签名、公证和钉票据的完整 App；这是 `sign_release.sh` 之后
-单独执行的发行步骤，不会自动发布或上传文件：
+正式打包与挂载校验（维护者环境，只需准备一次）：
 
 ```sh
 python3 -m venv build/dmg-venv
 build/dmg-venv/bin/python -m pip install -r launchers/macos/requirements-dmg.txt
 build/dmg-venv/bin/python launchers/macos/build_dmg.py \
   --app build/macos/S2Arm.app --output build/macos/S2Arm-mac-arm64.dmg
+build/dmg-venv/bin/python launchers/macos/build_dmg.py --check \
+  build/macos/S2Arm-mac-arm64.dmg
 ```
 
-打包不调用 Finder 或 AppleScript，不需要桌面自动化权限；严格校验输入和复制后
-App 的签名，再校验 DMG，成功后才替换目标文件。签名校验也接受本地 ad-hoc
-构建；脚本不会把它当作已公证发布包。安装说明不嵌入版本号，
+`--check` 用 `hdiutil` 只读挂载成品 DMG，逐项核对：`S2Arm.app` 的
+`codesign --verify --deep --strict`、`Applications` 是指向 `/Applications` 的符号链接、
+`.background.tiff` 可解码且含 1× / 2× 两帧、`.DS_Store` 的窗口 rect 与图标坐标和
+`dmg-layout.json` 一致（用 `requirements-dmg.txt` 里的 `ds_store` 包解析，不依赖
+Finder / AppleScript）。任一项不一致都报红并返回非 0。
+
+发版流程已接在 `sign_release.sh`：签名、公证、钉票据完成后，用同一个 App 调
+`build_dmg.py` 产出 `S2Arm-mac-arm64.dmg`，再对成品跑 `--check`，最终发行产物是 DMG；
+过程 zip 只用于 `notarytool` 提交、通过后删除。脚本默认用
+`build/dmg-venv/bin/python`，可用 `S2A_DMG_PYTHON` 指定别的已装依赖的解释器。
+打包不调用 Finder 或 AppleScript，不需要桌面自动化权限。签名校验也接受本地
+ad-hoc 构建；脚本不会把它当作已公证发布包。安装说明不嵌入版本号，
 图标不隐藏 `.app` 扩展名，避免改写已签名应用的 FinderInfo。
 依赖仅供维护者打包使用，不随玩家运行环境分发。
 
