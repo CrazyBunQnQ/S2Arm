@@ -360,7 +360,7 @@ def main():
     os.makedirs(os.path.join(out, 'res', 'values'))
     with open(os.path.join(out, 'res', 'values', 'game_name.xml'), 'w', encoding='utf-8', newline='\n') as f:
         f.write(f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
-                f'    <string name="game_name">{resource_string(label)}</string>\n</resources>\n')
+                f'    <string name="game_name" translatable="false">{resource_string(label)}</string>\n</resources>\n')
     print(f'{name} {version} [{title_id}]: {len(modules)} module files -> {out}')
 
 

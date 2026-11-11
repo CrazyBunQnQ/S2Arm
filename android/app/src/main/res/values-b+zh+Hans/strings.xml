@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="preview_title">S2Arm Android 预览</string>
+    <string name="preview_description">安卓宿主调试构建，尚未接入游戏运行。</string>
+    <string name="native_unavailable">原生宿主无法启动，详情见 S2Arm 日志。</string>
+    <string name="import_game">导入游戏包…</string>
     <string name="touch_menu_title">触屏控制</string>
     <string name="touch_menu_edit">编辑按键位置</string>
     <string name="touch_menu_reset">恢复默认布局</string>

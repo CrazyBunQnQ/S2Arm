@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- The diagnostic app's label; a per-game build is labelled game_name (tools/game_apk.py) -->
-    <string name="app_name" tools:ignore="UnusedResources">S2Arm Android</string>
+    <string name="app_name" translatable="false" tools:ignore="UnusedResources">S2Arm Android</string>
     <string name="preview_title">S2Arm Android preview</string>
     <string name="preview_description">Android host bring-up. Game execution is not connected yet.</string>
     <string name="native_unavailable">The native host could not start. See the S2Arm log for details.</string>
-    <string name="capability_status">%1$s\n%2$s</string>
+    <string name="capability_status" translatable="false">%1$s\n%2$s</string>
     <string name="import_game">Import game package…</string>
     <string name="touch_menu_title">Touch controls</string>
     <string name="touch_menu_edit">Edit button positions</string>

@@ -178,7 +178,7 @@ class Entrances(unittest.TestCase):
     def test_android_label(self):
         s = (ROOT / 'android/tools/game_apk.py').read_text(encoding='utf-8')
         self.assertIn("label = display_name.display_name(os.path.join(pack, 'ctl', 'control.nacp'))", s)
-        self.assertIn('<string name="game_name">{resource_string(label)}</string>', s)
+        self.assertIn('<string name="game_name" translatable="false">{resource_string(label)}</string>', s)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
