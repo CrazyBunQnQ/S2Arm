@@ -77,6 +77,12 @@ static __attribute__((noinline)) uint64_t gl_miss_call(int i) {
 GLM_4096(GLM_F)
 static void *const g_gl_miss_fn[GL_MISS_N] = { GLM_4096(GLM_P) };
 _Static_assert(sizeof g_gl_miss_fn / sizeof *g_gl_miss_fn == GL_MISS_N, "空实现表长");
+// 编号空实现用完（GL 全部核心名也到不了 4096，留作兜底）：共用这一个——不读参数、x0 回 0，arm64 下对任意签名的调用都安全；
+//   只是调用时点不出名字（lookup 那行已经记了名字），所以没有上限、永不回空
+static __attribute__((noinline)) uint64_t gl_miss_shared(void) {
+    static _Atomic uint8_t said; if (!atomic_exchange(&said, 1)) GLOG("【红】 游戏调了没实现的 GL 核心函数（编号空实现已用完、走共用空实现，名字见 lookup 行）");
+    return 0;
+}
 void *gl_lookup(const char *name) {
     static const hle_ent *sec; static unsigned long sz;
     if (!name) return NULL;
@@ -91,6 +97,7 @@ void *gl_lookup(const char *name) {
         static int nmiss; int i = 0; while (i < nmiss && strcmp(g_gl_miss_name[i], name)) i++;
         if (i == nmiss && nmiss < GL_MISS_N) { g_gl_miss_name[nmiss] = strdup(name); nmiss++; }
         if (i < nmiss) { fn = g_gl_miss_fn[i]; how = "没有（核心函数，交空实现）"; }
+        else { fn = (void *)gl_miss_shared; how = "没有（核心函数，交共用空实现）"; }
     }
     if (!known && nseen < 4096) { seen[nseen++] = strdup(name); GLOG("lookup %s → %s", name, how); }
     pthread_mutex_unlock(&mu);
