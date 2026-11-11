@@ -119,8 +119,61 @@ class Cancelled(Exception):
 
 
 def system_encoding():
+    """真实的系统编码（中文 Windows cp936、西文 Windows cp1252）。不用 getpreferredencoding：主作业带 -X utf8，UTF-8 模式下它回 utf-8，
+    v0.2.7 因此跳过系统编码、把 GBK 写坏的索引当 cp1252 写成了乱码（中文 Windows 实机复现）。getencoding（3.11+）不受 UTF-8 模式影响"""
     import locale
-    return locale.getpreferredencoding(False)
+    get = getattr(locale, "getencoding", None)
+    return get() if get else locale.getpreferredencoding(False)
+
+
+def _norm(enc):
+    return enc.replace("-", "").replace("_", "").lower()
+
+
+def _undo_misheal(path, value):
+    """v0.2.7 写成乱码的索引改回来：<名>.cp1252.bak 在、真实系统编码不是 cp1252、备份按系统编码严格解得开 = 当时该按系统编码解却按 cp1252 解了。
+    同一份备份分别按 cp1252（当时的乱码）与系统编码（原文）解，逐串配对，现有内容里的乱码串按表改回（之后库里新加的不动）；
+    备份改名为 <名>.<系统编码>.bak，下次不再改"""
+    bak = path.with_name(path.name + ".cp1252.bak")
+    if not bak.exists():
+        return value
+    enc = system_encoding()
+    if _norm(enc) in ("cp1252", "utf8", "windows1252"):
+        return value
+    raw = bak.read_bytes()
+    try:
+        good, bad = json.loads(raw.decode(enc)), json.loads(raw.decode("cp1252"))
+    except (UnicodeDecodeError, ValueError, LookupError):
+        return value
+    pairs = {}
+    def pair(b, g):
+        if isinstance(b, str) and isinstance(g, str):
+            if b != g:
+                pairs[b] = g
+        elif isinstance(b, list) and isinstance(g, list) and len(b) == len(g):
+            for x, y in zip(b, g):
+                pair(x, y)
+        elif isinstance(b, dict) and isinstance(g, dict) and len(b) == len(g):
+            for (kb, vb), (kg, vg) in zip(b.items(), g.items()):
+                pair(kb, kg); pair(vb, vg)
+    pair(bad, good)
+    def fix(v):
+        if isinstance(v, str):
+            return pairs.get(v, v)
+        if isinstance(v, list):
+            return [fix(x) for x in v]
+        if isinstance(v, dict):
+            return {fix(k): fix(x) for k, x in v.items()}
+        return v
+    fixed = fix(value)
+    if fixed != value:
+        atomic(path, fixed)
+    keep = path.with_name(f"{path.name}.{enc}.bak")
+    if keep.exists():
+        bak.unlink()
+    else:
+        os.replace(bak, keep)
+    return fixed
 
 
 def read(path, default=None):
@@ -134,9 +187,9 @@ def read(path, default=None):
     except (FileNotFoundError, NotADirectoryError):   # NotADirectoryError：路径中间一级是文件（遍历到 .DS_Store 再读 .DS_Store/game.json，#343）＝没有
         return default
     try:
-        return json.loads(raw.decode("utf-8"))
+        return _undo_misheal(path, json.loads(raw.decode("utf-8")))
     except UnicodeDecodeError as first:
-        for enc in dict.fromkeys(e for e in (system_encoding(), "cp1252") if e and e.replace("-", "").lower() != "utf8"):
+        for enc in dict.fromkeys(e for e in (system_encoding(), "cp1252") if e and _norm(e) != "utf8"):
             try:
                 value = json.loads(raw.decode(enc))
             except (UnicodeDecodeError, ValueError, LookupError):
