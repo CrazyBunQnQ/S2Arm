@@ -111,6 +111,7 @@ struct gl_texture {
     GLenum target; tex_level level[6][TEX_LEVELS];
     __strong id<MTLTexture> sample, view, view_src; __strong id<MTLSamplerState> sampler; int sample_base, sample_count;   // view：view_src（某次的采样贴图）的换位视图（要换位的格式才有）
     GLint base, max; int immutable, gpu_written; uint64_t last_use; tex_params params;
+    uint8_t uswz[4];   // GL_TEXTURE_SWIZZLE_R / G / B / A：0 = 缺省（该通道取自己），否则 MTLTextureSwizzle + 1（采样视图上叠在格式换位之后，见 swizzled）
     gl_wd_shadow wd;   // 宽屏附件影子（gl_widen.inc）
 };
 struct gl_sampler { tex_params params; __strong id<MTLSamplerState> state; };
@@ -471,6 +472,16 @@ static int parameter(tex_params *p, GLenum what, double value, int sampler, gl_t
     case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T: case GL_TEXTURE_WRAP_R:
         if (value != v || (v != GL_REPEAT && v != GL_CLAMP_TO_EDGE && v != GL_MIRRORED_REPEAT && v != GL_CLAMP_TO_BORDER && v != GL_CLAMP)) break;
         p->wrap[what == GL_TEXTURE_WRAP_S ? 0 : what == GL_TEXTURE_WRAP_T ? 1 : 2] = v == GL_CLAMP ? GL_CLAMP_TO_EDGE : v; return 1;   // 旧 GL_CLAMP 按夹到边
+    case 0x8E42: case 0x8E43: case 0x8E44: case 0x8E45: {   // GL_TEXTURE_SWIZZLE_R / G / B / A（GL 3.3 / ES 3.0；纹理对象的状态，采样器对象没有）
+        //   小丑牌 / LÖVE 11 建单 / 双通道格式时设它；以前报 INVALID_ENUM，LÖVE 建纹理后查 glGetError 抛异常、游戏退出
+        if (sampler || value != v) break;
+        int c = (int)what - 0x8E42, m = v == 0x1903 ? MTLTextureSwizzleRed : v == 0x1904 ? MTLTextureSwizzleGreen : v == 0x1905 ? MTLTextureSwizzleBlue :
+                v == 0x1906 ? MTLTextureSwizzleAlpha : v == 0 ? MTLTextureSwizzleZero : v == 1 ? MTLTextureSwizzleOne : -1;
+        if (m < 0) break;
+        uint8_t u = m == MTLTextureSwizzleRed + c ? 0 : (uint8_t)(m + 1);   // 取自己 = 缺省，存 0：全缺省时不建换位视图
+        if (t->uswz[c] != u) { t->uswz[c] = u; t->view = nil; t->view_src = nil; }
+        return 1;
+    }
     case GL_TEXTURE_BASE_LEVEL: case GL_TEXTURE_MAX_LEVEL:
         if (sampler) break; if (v < 0) { gl_set_error(GL_INVALID_VALUE); return 0; }
         if (what == GL_TEXTURE_BASE_LEVEL) { if (t->base != v) sample_drop(t); t->base = v; }
@@ -484,6 +495,8 @@ GL(glGetTexParameteriv, void, GLenum target, GLenum what, GLint *v) {
     const tex_params *q = &t->params;
     switch (what) {
         case 0x2801: *v = (GLint)q->min; return;  case 0x2800: *v = (GLint)q->mag; return;                    // MIN / MAG_FILTER
+        case 0x8E42: case 0x8E43: case 0x8E44: case 0x8E45: { int c = (int)what - 0x8E42, u = t->uswz[c] ? t->uswz[c] - 1 : MTLTextureSwizzleRed + c;   // SWIZZLE_R / G / B / A
+            *v = u == MTLTextureSwizzleZero ? 0 : u == MTLTextureSwizzleOne ? 1 : 0x1903 + (u - MTLTextureSwizzleRed); return; }
         case 0x2802: *v = (GLint)q->wrap[0]; return; case 0x2803: *v = (GLint)q->wrap[1]; return; case 0x8072: *v = (GLint)q->wrap[2]; return;   // WRAP_S / T / R
         case GL_TEXTURE_COMPARE_MODE: *v = (GLint)q->compare_mode; return; case GL_TEXTURE_COMPARE_FUNC: *v = (GLint)q->compare_func; return;
         case 0x813C: *v = t->base; return; case 0x813D: *v = t->max; return;                                  // BASE / MAX_LEVEL
@@ -646,10 +659,16 @@ static id<MTLTexture> black_image(int slot) {   // 目标序号同 gl_tex_slot�
     return g_black[slot] = b;
 }
 // 要换位的格式（亮度 / alpha / 不带 alpha 的 DXT1）：按组好的采样贴图建一个换位视图，同一张采样贴图只建一次
+// 游戏设的 GL_TEXTURE_SWIZZLE_*（uswz）叠在格式换位之后：GL 规定换位作用在格式展开后的 (R,G,B,A) 上，所以取「格式换位的第 k 个分量」
 static id<MTLTexture> swizzled(gl_texture *t, id<MTLTexture> image) {
-    const fmt_t *m = &k_fmt[t->level[0][base_level(t)].fmt]; if (!m->swizzled) return image;
+    const fmt_t *m = &k_fmt[t->level[0][base_level(t)].fmt];
+    if (!m->swizzled && !(t->uswz[0] | t->uswz[1] | t->uswz[2] | t->uswz[3])) return image;
     if (t->view && t->view_src == image) return t->view;
-    t->view_src = image; t->view = [image newTextureViewWithPixelFormat:image.pixelFormat textureType:image.textureType levels:NSMakeRange(0, image.mipmapLevelCount) slices:NSMakeRange(0, view_slices(image)) swizzle:m->swz];
+    static const MTLTextureSwizzleChannels identity = SW0; const MTLTextureSwizzleChannels base = m->swizzled ? m->swz : identity;
+    const MTLTextureSwizzle bc[4] = {base.red, base.green, base.blue, base.alpha}; MTLTextureSwizzle out[4];
+    for (int c = 0; c < 4; c++) { int u = t->uswz[c] ? t->uswz[c] - 1 : MTLTextureSwizzleRed + c; out[c] = u <= MTLTextureSwizzleOne ? (MTLTextureSwizzle)u : bc[u - MTLTextureSwizzleRed]; }
+    t->view_src = image; t->view = [image newTextureViewWithPixelFormat:image.pixelFormat textureType:image.textureType levels:NSMakeRange(0, image.mipmapLevelCount) slices:NSMakeRange(0, view_slices(image))
+                                                                   swizzle:MTLTextureSwizzleChannelsMake(out[0], out[1], out[2], out[3])];
     return t->view;
 }
 int gl_tex_prepare(const struct gl_program *program) {

@@ -826,6 +826,32 @@ static void t_tex_storage3d(void) {
     st3(0x0DE1, 1, 0x8058, 1, 1, 1); GLenum e8 = glGetError(); CHECK(e8 == 0x500, "2D 目标给 TexStorage3D 报 INVALID_ENUM（%#x）", e8);
     glBindTexture(0x806F, 0); glBindTexture(0x8C1A, 0);
 }
+// GL_TEXTURE_SWIZZLE_*（小丑牌 / LÖVE 11 建单 / 双通道纹理时设；以前报 INVALID_ENUM、LÖVE 抛异常退出）。期望手算：texel (10,20,30,40)，
+//   换位 R←B、G←R、B←1、A←G → 采样 (30,10,255,20)；改回缺省 → (10,20,30,40)；采样器对象设它 → INVALID_ENUM
+static void t_tex_swizzle(void) {
+    printf("S2 纹理通道换位\n");
+    G(glSamplerParameteri, void, GLuint, GLenum, GLint) G(glGenSamplers, void, GLsizei, GLuint *) G(glGetTexParameteriv, void, GLenum, GLenum, GLint *)
+    GLuint prog = program("texture"), fb = fbo_rb(8, 8, NULL); (void)fb; glUseProgram(prog); glViewport(0, 0, 8, 8);
+    glUniform2f(glGetUniformLocation(prog, "uScale"), 1, 1); glUniform2f(glGetUniformLocation(prog, "uOff"), 0, 0);
+    glUniform2f(glGetUniformLocation(prog, "uUVScale"), 1, 1); glUniform2f(glGetUniformLocation(prog, "uUVOff"), 0, 0); glUniform1i(glGetUniformLocation(prog, "uTex"), 0);
+    GLuint vao, vbo; glGenVertexArrays(1, &vao); glBindVertexArray(vao); glGenBuffers(1, &vbo); glBindBuffer(0x8892, vbo);
+    const float quad[] = {-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1}; glBufferData(0x8892, sizeof quad, quad, 0x88E4);
+    GLint ap = glGetAttribLocation(prog, "aPos"); glVertexAttribPointer((GLuint)ap, 2, 0x1406, 0, 8, 0); glEnableVertexAttribArray((GLuint)ap);
+    const uint8_t px[4] = {10, 20, 30, 40}; GLuint tex; glGenTextures(1, &tex); glActiveTexture(0x84C0); glBindTexture(0x0DE1, tex);
+    glTexParameteri(0x0DE1, 0x2801, 0x2600); glTexParameteri(0x0DE1, 0x2800, 0x2600); glTexImage2D(0x0DE1, 0, 0x8058, 1, 1, 0, 0x1908, 0x1401, px);
+    while (glGetError()) {}
+    glTexParameteri(0x0DE1, 0x8E42, 0x1905); glTexParameteri(0x0DE1, 0x8E43, 0x1903); glTexParameteri(0x0DE1, 0x8E44, 1); glTexParameteri(0x0DE1, 0x8E45, 0x1904); GLenum e0 = glGetError();
+    GLint q[4] = {0}; for (int c = 0; c < 4; c++) glGetTexParameteriv(0x0DE1, 0x8E42 + c, &q[c]);
+    CHECK(!e0 && q[0] == 0x1905 && q[1] == 0x1903 && q[2] == 1 && q[3] == 0x1904, "SWIZZLE_R/G/B/A 设置无错、查询读回（错 %#x，读回 %#x %#x %#x %#x）", e0, q[0], q[1], q[2], q[3]);
+    char s[32]; glDrawArrays(4, 0, 6); glFinish(); pxs(4, 4, s);
+    CHECK(px_is(4, 4, 30, 10, 255, 20), "换位后采样 = (30,10,255,20)（%s）", s);
+    for (int c = 0; c < 4; c++) glTexParameteri(0x0DE1, 0x8E42 + c, 0x1903 + c);
+    glDrawArrays(4, 0, 6); glFinish(); pxs(4, 4, s);
+    CHECK(px_is(4, 4, 10, 20, 30, 40) && !glGetError(), "改回缺省后采样 = 原值 (10,20,30,40)（%s）", s);
+    GLuint smp; glGenSamplers(1, &smp); glSamplerParameteri(smp, 0x8E42, 0x1903); GLenum e1 = glGetError(); glTexParameteri(0x0DE1, 0x8E42, 0x1234); GLenum e2 = glGetError();
+    CHECK(e1 == 0x500 && e2 == 0x500, "采样器对象设换位 / 非法取值 → INVALID_ENUM（%#x %#x）", e1, e2);
+    glBindTexture(0x0DE1, 0);
+}
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }
     BASE(LOAD)
@@ -839,6 +865,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_tex_swizzle(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}
