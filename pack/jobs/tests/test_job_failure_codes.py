@@ -427,6 +427,16 @@ class FreeAccountLimits(unittest.TestCase):
         self.assertEqual((install.classify(raw), impactor.explain(raw)), ("app_id_taken", "app_id_taken"))
         self.assertTrue(loc.get(RECOVERY["app_id_taken"]) and spec["app_id_taken"]["title"]["en"] and "app_id_taken" in guide)
         self.assertEqual(ctl.AI_NEXT["app_id_taken"][0], "human")
+        # apple_session_expired（玩家错误摘要原文，Windows v0.2.7 plumesign 恢复保存的会话时报）：认成登录过期、给 Impactor 重新登录的办法，各处都登记；
+        #   旁边的 9401 / 两步验证 / 密码错各自仍归原码，不被这条吞掉
+        raw = "Error: Developer API error 1100 (HTTP Some(200)): Your session has expired. Please log in. (listTeams.action)"
+        self.assertEqual(impactor.explain(raw), "apple_session_expired")
+        self.assertIn("移除账号", RECOVERY["apple_session_expired"]); self.assertIn("添加账号", RECOVERY["apple_session_expired"])
+        self.assertTrue(loc.get(RECOVERY["apple_session_expired"]) and spec["apple_session_expired"]["title"]["en"] and "apple_session_expired" in guide)
+        self.assertEqual(ctl.AI_NEXT["apple_session_expired"][0], "human")
+        for other, code in (("Developer API error 9401: An App ID with Identifier 'x' is not available.", "app_id_taken"),
+                            ("-21669 verification code", "two_factor_wrong"), ("-20101 entered incorrectly", "apple_id_wrong")):
+            self.assertEqual(impactor.explain(other), code)
 
 
 class LogCauses(JobCase):
