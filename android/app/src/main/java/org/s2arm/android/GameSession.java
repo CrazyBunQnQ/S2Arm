@@ -174,7 +174,8 @@ final class GameSession implements AutoCloseable {
                     String mainImage = game.modules.get(0).image;
                     int slash = mainImage.lastIndexOf('/');
                     String moduleDir = slash < 0 ? "" : mainImage.substring(0, slash + 1);
-                    for (String policy : new String[]{"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"}) {
+                    // 整包一份的可选表（与 bridge.cpp k_optional_tables 一致）：宽屏策略表 + 社区补丁表 cpatch.tsv（#48 D2）
+                    for (String policy : new String[]{"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv", "cpatch.tsv"}) {
                         String path = apk.assetRoot + "/" + moduleDir + policy;
                         if (zip.getEntry("assets/" + path) == null) continue;
                         byte[] policyBytes = asset(zip, path);

@@ -3,7 +3,8 @@
 //   这里只做两件事：按开关算掩码写进槽 2046；开着的补丁的数据写入（代码段之后，ro / data）写成补丁值，写前核原值（对不上 = 包与游戏不配套，那份不开）。
 // 开关：S2A_CPATCH_ON = 逗号分隔的补丁编号（iOS 由 App 设置 S2ACommunityPatches 转来，ios/settings.m）；none = 全关；不设时 Apple 按表里「缺省开」、Android 全关。下次启动生效
 // 帧率类（编号 fps:）另跟 60 帧开关走（帧率能耗线 runtime/src/fps.c 起局与每次切换调 s2a_cpatch_fps_follow；没有我方帧率表的款才收这类，见 pack/cpatch.py）
-// 随包表：cpatch.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
+// 随包表：cpatch.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单；
+//   安卓 android/tools/make_pack.py 按安卓改写器出表放进 modules/，APK 起局经资源读面交 s2a_cpatch_load_source）
 #include "native.h"
 #include <errno.h>
 #include <stdatomic.h>
@@ -75,8 +76,8 @@ int s2a_cpatch_data_writes(module_t *m, const char *spec, int mode) {
     }
     return 0;
 }
-void s2a_cpatch_load(module_t *m, const char *dir) {
-    char p[1100]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "r"); if (!f) return;
+// 一个模块按表装载：f 由调用方打开（目录装载 = 模块目录的 cpatch.tsv；APK 起局 = 已验签的内存表），这里读完关掉
+static void cpatch_load_stream(module_t *m, FILE *f) {
     g_boot_file = f;
     const char *on = getenv("S2A_CPATCH_ON");
 #if defined(__ANDROID__) || defined(S2A_CPATCH_ANDROID_DEFAULT)
@@ -129,6 +130,20 @@ void s2a_cpatch_load(module_t *m, const char *dir) {
     }
     if (fbits) { g_fm[g_nfm].slot = (_Atomic uint64_t *)((uint64_t *)page + CP_SLOT); g_fm[g_nfm].bits = fbits; g_nfm++; }
 }
+void s2a_cpatch_load(module_t *m, const char *dir) {
+    char p[1100]; snprintf(p, sizeof p, "%s/cpatch.tsv", dir); FILE *f = fopen(p, "r"); if (!f) return;
+    cpatch_load_stream(m, f);
+}
+#if defined(__ANDROID__) || defined(S2A_CPATCH_ANDROID_DEFAULT)
+// APK 起局（loader.c load_modules_from_source）：表与模块旁车同经已验签的 APK 资源读面读进内存，每个模块各按表装一遍。
+//   表进了包却读不到 / 读坏 = 包有问题，报红中止（同 s2a_widen_load_source）；没有这张表的包由调用方跳过
+void s2a_cpatch_load_source(module_t *m, const void *bytes, size_t length) {
+    if (!bytes || !length || length > 16 * 1024 * 1024 || memchr(bytes, 0, length)) die("%s：APK 社区补丁表无效", m->name);
+    FILE *f = fmemopen((void *)(uintptr_t)bytes, length, "r");   // 只读打开，不写回调用方的租约内存
+    if (!f) die("APK 社区补丁表无法读取 errno=%d", errno);
+    cpatch_load_stream(m, f);
+}
+#endif
 // 60 帧开关（fps.c 起局一次、运行中每次切换调）：帧率类各位一起置开 / 关；它们的数据写入写补丁值 / 写回原值（原值在装载时核过）
 void s2a_cpatch_fps_follow(int on) {
     for (int i = 0; i < g_nfm; i++) { if (on) atomic_fetch_or(g_fm[i].slot, g_fm[i].bits); else atomic_fetch_and(g_fm[i].slot, ~g_fm[i].bits); }

@@ -613,9 +613,11 @@ static int missing_policy_error(const std::string &path) {
     return status == 0 ? ENOENT : EIO;
 }
 
-static bool optional_widen_policy(const char *name) {
-    static const char *const names[] = {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"};
-    for (const char *candidate : names) if (!strcmp(name, candidate)) return true;
+// 整包一份、放在 modules/ 的可选表（main 旁边）：宽屏策略表 + 社区补丁表（#48 D2）。与 GameSession.java 准入名单一致
+static const char *const k_optional_tables[] = {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv",
+                                                "widen_full.docked.tsv", "widen_verified.tsv", "cpatch.tsv"};
+static bool optional_table(const char *name) {
+    for (const char *candidate : k_optional_tables) if (!strcmp(name, candidate)) return true;
     return false;
 }
 
@@ -631,7 +633,7 @@ static int read_game_asset(void *context, const char *filename, s2a_loader_blob 
         FILE *file = fopen(found->second.c_str(), "rb");
         if (!file) {
             if (errno != ENOENT) return errno;
-            return optional_widen_policy(filename) ? missing_policy_error(found->second) : EIO;
+            return optional_table(filename) ? missing_policy_error(found->second) : EIO;
         }
         if (fseeko(file, 0, SEEK_END) != 0) { fclose(file); return EIO; }
         off_t length = ftello(file);
@@ -647,7 +649,7 @@ static int read_game_asset(void *context, const char *filename, s2a_loader_blob 
         return 0;
     }
     AAsset *asset = AAssetManager_open(host->assets, found->second.c_str(), AASSET_MODE_BUFFER);
-    if (!asset) return optional_widen_policy(filename) ? missing_policy_error(found->second) : EIO;
+    if (!asset) return optional_table(filename) ? missing_policy_error(found->second) : EIO;
     off64_t length = AAsset_getLength64(asset);
     const void *bytes = AAsset_getBuffer(asset);
     if (length < 0 || (length && !bytes) || !verify_game_bytes(found->second, bytes, static_cast<size_t>(length))) {
@@ -1015,7 +1017,7 @@ Java_org_s2arm_android_NativeBridge_startGame(JNIEnv *env, jclass, jlong handle,
             const std::string &root = host->asset_root.empty() ? host->game_data : host->asset_root;
             std::string directory = image.substr(0, image.size() - base.size());
             if (i == 0) {
-                for (const char *policy : {"widen_enable.handheld.tsv", "widen_enable.docked.tsv", "widen_full.handheld.tsv", "widen_full.docked.tsv", "widen_verified.tsv"})
+                for (const char *policy : k_optional_tables)
                     host->asset_paths.emplace(policy, root + "/" + directory + policy);
             }
             if (!host->asset_paths.emplace(name + ".patched.bin", root + "/" + image).second) return EINVAL;

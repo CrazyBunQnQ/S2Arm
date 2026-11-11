@@ -1030,6 +1030,11 @@ void load_modules_from_source(const struct s2a_loader_source *source, const char
         s2a_widen_source_policy(i, blob.bytes, blob.length);
         source->release(source->context, &blob);
     }
+    // 社区补丁表（#48 D2，make_pack 放在 modules/，与宽屏表同一读面验签）：整包一张表，读一次，每个模块各装一遍，全部装完再还
+    void s2a_cpatch_load_source(module_t *, const void *, size_t);
+    struct s2a_loader_blob cpatch = {0};
+    int cpatch_rc = source->read(source->context, "cpatch.tsv", &cpatch);
+    if (cpatch_rc != ENOENT && (cpatch_rc || (!cpatch.bytes && cpatch.length))) die("APK 读取 cpatch.tsv 失败 rc=%d", cpatch_rc);
     create_keys();
     if (plat_tsd_init()) die("TSD 初始化失败");
     for (int i = 0; i < n; i++) {
@@ -1059,9 +1064,11 @@ void load_modules_from_source(const struct s2a_loader_source *source, const char
             s2a_widen_load_source(m, widen.bytes, widen.length);
             source->release(source->context, &widen);
         }
+        if (cpatch_rc != ENOENT) s2a_cpatch_load_source(m, cpatch.bytes, cpatch.length);   // 同目录装载：宽屏之后、统一重定位之前
         LOG("%s: APK 基址 %p 大小 %#zx", names[i], m->base, m->size);
         g_nmod++;
     }
+    if (cpatch_rc != ENOENT) source->release(source->context, &cpatch);
     free(fixups);
     finish_modules();
 }

@@ -10,6 +10,8 @@ public final class GameSessionAdmissionTest {
     static int checks;
     static final String TITLE = "0100000000ABCDEF";
     static final byte[] IMAGE = {1, 2, 3, 4};
+    static final byte[] CPATCH = "编号\t模块\t位\t类别\t段名\t许可\t来源\t数据写入\t缺省开\ngfx:A\tmain\t0\tother-gfx\tA\t\ta.pchtxt\t\t0\n"
+        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
     static void check(boolean ok, String why) { checks++; if (!ok) throw new AssertionError(why); }
     static Path fixture(Path app) throws Exception { return fixture(app, true); }
     static Path fixture(Path app, boolean addressNeeds) throws Exception {
@@ -76,7 +78,8 @@ public final class GameSessionAdmissionTest {
         try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(path))) {
             for (var entry : Map.of("main.patched.bin", IMAGE, "main.fixups.tsv",
                     "# TARGET\tandroid\n# REWRITE_ABI\tandroid-sp-safe-v1\n".getBytes(StandardCharsets.UTF_8),
-                    "main.gates.tsv", new byte[]{10}, "widen_enable.handheld.tsv", "main\t0x10\tmovz\t1\n".getBytes(StandardCharsets.UTF_8)).entrySet()) {
+                    "main.gates.tsv", new byte[]{10}, "widen_enable.handheld.tsv", "main\t0x10\tmovz\t1\n".getBytes(StandardCharsets.UTF_8),
+                    "cpatch.tsv", CPATCH).entrySet()) {
                 zip.putNextEntry(new java.util.zip.ZipEntry("assets/game/modules/" + entry.getKey()));
                 zip.write(entry.getValue()); zip.closeEntry();
             }
@@ -257,6 +260,14 @@ public final class GameSessionAdmissionTest {
                 policy[0] ^= 1;
                 check(!GameSession.verifyNativeBytes("game/modules/widen_enable.handheld.tsv", java.nio.ByteBuffer.wrap(policy)),
                     "changed widening policy is rejected");
+                // #48 D2：社区补丁表与宽屏表同口径进准入名单，原生读面按同一份哈希验
+                check(GameSession.nativeFileAdmission("game/modules/cpatch.tsv") == 1, "APK community patch table is admitted");
+                byte[] table = CPATCH.clone();
+                check(GameSession.verifyNativeBytes("game/modules/cpatch.tsv", java.nio.ByteBuffer.wrap(table)),
+                    "APK community patch table admitted for native authenticated reads");
+                table[table.length - 2] ^= 1;
+                check(!GameSession.verifyNativeBytes("game/modules/cpatch.tsv", java.nio.ByteBuffer.wrap(table)),
+                    "changed community patch table is rejected");
             }
             // The persisted (size, dev, ino, mtime) stamp lets a later boot skip re-hashing the APK.
             Map<String,Object> doc = Json.object(Json.parse(Files.readString(assetGame.resolve("current.json"))),"current");
