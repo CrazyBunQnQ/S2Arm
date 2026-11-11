@@ -774,6 +774,20 @@ static void t_love(void) {
     eglMakeCurrent(g_dpy, g_sf, g_sf, es); eglDestroyContext(g_dpy, gl);
 }
 
+// S 核心函数不回空（小丑牌 v0.2.6 iPhone 起局 5 次闪退：LÖVE 按报的 GL 4.5 取核心函数，没实现的回空，调用跳到 0 被代码签名杀掉）；
+//   GL_FRAMEBUFFER_SRGB 开关可开关可查、不置错（原先 glIsEnabled / glDisable 都置 0x500）。期望按 GL 规范与本层约定手写：
+//   核心名（结尾不是两个以上大写字母）没实现 → 非空、调用回 0；带厂商后缀的没实现 → 空；FRAMEBUFFER_SRGB 缺省关、开了查得到开、全程无错
+static void t_core_stub(void) {
+    void *core = gpa("glS2aNoSuchCore"), *ext = gpa("glS2aNoSuchFuncARB");
+    CHECK(core != NULL, "没实现的核心名拿到非空入口（空实现）");
+    CHECK(core && ((uint64_t (*)(void))core)() == 0, "调用空实现不崩、回 0");
+    CHECK(core == gpa("glS2aNoSuchCore"), "同名再查拿到同一个空实现");
+    CHECK(ext == NULL, "带厂商后缀的没实现照旧回空（程序按指针判扩展支持）");
+    GLboolean (*isen)(GLenum) = gpa("glIsEnabled"); void (*en)(GLenum) = gpa("glEnable"), (*dis)(GLenum) = gpa("glDisable");
+    while (glGetError()) {}
+    GLboolean a = isen(0x8DB9); GLenum e0 = glGetError(); en(0x8DB9); GLboolean b = isen(0x8DB9); GLenum e1 = glGetError(); dis(0x8DB9); GLboolean c = isen(0x8DB9); GLenum e2 = glGetError();
+    CHECK(!a && b && !c && !e0 && !e1 && !e2, "GL_FRAMEBUFFER_SRGB：缺省关 / 开后查得开 / 关后查得关，全程无错（%d %d %d，错 %#x %#x %#x）", a, b, c, e0, e1, e2);
+}
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }
     BASE(LOAD)
@@ -787,6 +801,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}
