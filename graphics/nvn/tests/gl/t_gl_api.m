@@ -774,6 +774,53 @@ static void t_love(void) {
     eglMakeCurrent(g_dpy, g_sf, g_sf, es); eglDestroyContext(g_dpy, gl);
 }
 
+// S 核心函数不回空（小丑牌 v0.2.6 iPhone 起局 5 次闪退：LÖVE 按报的 GL 4.5 取核心函数，没实现的回空，调用跳到 0 被代码签名杀掉）；
+//   GL_FRAMEBUFFER_SRGB 开关可开关可查、不置错（原先 glIsEnabled / glDisable 都置 0x500）。期望按 GL 规范与本层约定手写：
+//   核心名（结尾不是两个以上大写字母）没实现 → 非空、调用回 0；带厂商后缀的没实现 → 空；FRAMEBUFFER_SRGB 缺省关、开了查得到开、全程无错
+static void t_core_stub(void) {
+    void *core = gpa("glS2aNoSuchCore"), *ext = gpa("glS2aNoSuchFuncARB");
+    CHECK(core != NULL, "没实现的核心名拿到非空入口（空实现）");
+    CHECK(core && ((uint64_t (*)(void))core)() == 0, "调用空实现不崩、回 0");
+    CHECK(core == gpa("glS2aNoSuchCore"), "同名再查拿到同一个空实现");
+    CHECK(ext == NULL, "带厂商后缀的没实现照旧回空（程序按指针判扩展支持）");
+    // 小丑牌 v0.2.7 起局查了 854 个没实现的核心名：1000 个不同名字都要拿到各自的空实现（以前 256 个用完就回空、照样跳 0）
+    int got = 0, distinct = 1; void *prev = NULL; char nm[40];
+    for (int i = 0; i < 1000; i++) { snprintf(nm, sizeof nm, "glS2aMissCore%dxyz", i); void *f = gpa(nm); got += f != NULL; if (f && f == prev) distinct = 0; prev = f; }
+    CHECK(got == 1000 && distinct, "1000 个不同的没实现核心名全部拿到空实现、相邻两个不共用（拿到 %d）", got);
+    // 编号空实现用完以后（再查 3200 个，累计超 4096）照样不回空，拿到的共用空实现调用回 0
+    int got2 = 0, ret0 = 1; for (int i = 0; i < 3200; i++) { snprintf(nm, sizeof nm, "glS2aMissMore%dxyz", i); void *f = gpa(nm); got2 += f != NULL; if (f && ((uint64_t (*)(void))f)() != 0) ret0 = 0; }
+    CHECK(got2 == 3200 && ret0, "超过 4096 个没实现核心名后仍全部拿到空实现、调用回 0（拿到 %d）", got2);
+    GLboolean (*isen)(GLenum) = gpa("glIsEnabled"); void (*en)(GLenum) = gpa("glEnable"), (*dis)(GLenum) = gpa("glDisable");
+    while (glGetError()) {}
+    GLboolean a = isen(0x8DB9); GLenum e0 = glGetError(); en(0x8DB9); GLboolean b = isen(0x8DB9); GLenum e1 = glGetError(); dis(0x8DB9); GLboolean c = isen(0x8DB9); GLenum e2 = glGetError();
+    CHECK(!a && b && !c && !e0 && !e1 && !e2, "GL_FRAMEBUFFER_SRGB：缺省关 / 开后查得开 / 关后查得关，全程无错（%d %d %d，错 %#x %#x %#x）", a, b, c, e0, e1, e2);
+}
+// LÖVE 11 起局 createDefaultTexture：3D 与 2D 数组各建 1×1 不可变存储、子图写一个白像素（小丑牌 v0.2.7 崩在这里：glTexStorage3D 以前回空）
+static void t_tex_storage3d(void) {
+    void (*st3)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei) = gpa("glTexStorage3D");
+    void (*sub3)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum, GLenum, const void *) = gpa("glTexSubImage3D");
+    void (*img3)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = gpa("glTexImage3D");
+    void (*getimg)(GLenum, GLint, GLenum, GLenum, void *) = gpa("glGetTexImage"); void (*gtpi)(GLenum, GLenum, GLint *) = gpa("glGetTexParameteriv");
+    if (!st3 || !sub3 || !img3 || !getimg) return;
+    while (glGetError()) {}
+    const uint8_t white[4] = {255, 255, 255, 255}; uint8_t out[4]; GLuint t[2]; glGenTextures(2, t); const GLenum tg[2] = {0x806F, 0x8C1A};   // 3D、2D 数组
+    for (int i = 0; i < 2; i++) {
+        glActiveTexture(0x84C0); glBindTexture(tg[i], t[i]); st3(tg[i], 1, 0x8058, 1, 1, 1); GLenum e0 = glGetError();
+        sub3(tg[i], 0, 0, 0, 0, 1, 1, 1, 0x1908, 0x1401, white); GLenum e1 = glGetError();
+        memset(out, 0, sizeof out); getimg(tg[i], 0, 0x1908, 0x1401, out); GLenum e2 = glGetError();
+        GLint lv = -1; if (gtpi) gtpi(tg[i], 0x82DF, &lv);
+        CHECK(!e0 && !e1 && !e2 && !memcmp(out, white, 4) && lv == 1, "%s 1×1 不可变存储 + 子图写白 → 读回白、IMMUTABLE_LEVELS=1、无错（错 %#x %#x %#x，读回 %d %d %d %d，级数 %d）",
+              i ? "2D 数组" : "3D", e0, e1, e2, out[0], out[1], out[2], out[3], lv);
+        st3(tg[i], 1, 0x8058, 1, 1, 1); GLenum e3 = glGetError(); img3(tg[i], 0, 0x8058, 1, 1, 1, 0, 0x1908, 0x1401, white); GLenum e4 = glGetError();
+        CHECK(e3 == 0x502 && e4 == 0x502, "%s 不可变后再 TexStorage3D / TexImage3D 都报 INVALID_OPERATION（%#x %#x）", i ? "2D 数组" : "3D", e3, e4);
+    }
+    GLuint t3; glGenTextures(1, &t3); glBindTexture(0x806F, t3); st3(0x806F, 3, 0x8058, 4, 4, 2); GLenum e5 = glGetError();
+    uint8_t px[4 * 4 * 2 * 4]; memset(px, 0x40, sizeof px); sub3(0x806F, 2, 0, 0, 0, 1, 1, 1, 0x1908, 0x1401, white); GLenum e6 = glGetError();
+    sub3(0x806F, 2, 0, 0, 0, 1, 1, 2, 0x1908, 0x1401, px); GLenum e7 = glGetError();
+    CHECK(!e5 && !e6 && e7 == 0x501, "3D 4×4×2 三级：第 2 级是 1×1×1（写 1 片无错、写 2 片越界 INVALID_VALUE；错 %#x %#x %#x）", e5, e6, e7);
+    st3(0x0DE1, 1, 0x8058, 1, 1, 1); GLenum e8 = glGetError(); CHECK(e8 == 0x500, "2D 目标给 TexStorage3D 报 INVALID_ENUM（%#x）", e8);
+    glBindTexture(0x806F, 0); glBindTexture(0x8C1A, 0);
+}
 int main(void) { alarm(120); @autoreleasepool {
 #define LOAD(name, ret, ...) name = (ret (*)(__VA_ARGS__))gpa(#name); if (!name) { printf("✗ 取不到已有入口 %s\n", #name); return 1; }
     BASE(LOAD)
@@ -787,6 +834,6 @@ int main(void) { alarm(120); @autoreleasepool {
     g_sf = eglCreateWindowSurface(g_dpy, cfg, NULL, NULL); EGLContext ctx = eglCreateContext(g_dpy, cfg, NULL, ctx_attr);
     if (!eglMakeCurrent(g_dpy, g_sf, g_sf, ctx)) { printf("✗ 建上下文失败\n"); return 1; }
     g_tri = program("tri"); glGenVertexArrays(1, &g_tri_vao); glGenBuffers(1, &g_tri_vbo);
-    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
+    t_queries(); t_sync(); t_readback(); t_fb_query(); t_volume(); t_msaa(); t_map(); t_instanced(); t_packed_attr(); t_raster_read(); t_uniforms(); t_names_programs(); t_threads(); t_frame_storage(); t_core_stub(); t_tex_storage3d(); t_api_version(); t_map_range(); t_es300(); t_sampler_array(); t_shader_iv(); t_love();
     printf("%s t_gl_api：%d 项，失败 %d\n", fails ? "✗" : "✓", checks, fails); return fails != 0;
 }}

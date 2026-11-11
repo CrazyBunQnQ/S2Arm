@@ -767,6 +767,28 @@ GLB(glTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z
     if (image != old) sample_drop(t);
     else if (!(t->sample && image.parentTexture == t->sample)) sample_drop(t);
 }}
+// 体纹理的不可变存储（小丑牌 / LÖVE 11 起局给每种纹理类型建 1×1 默认纹理，3D 与 2D 数组走这里；以前查表回空，游戏跳到地址 0 被系统杀）。
+//   存法同 glTexImage3D：每级一张（level[0][l]），2D 数组每级层数不变、3D 每级三边各减半；之后只能 glTexSubImage3D 改内容。
+GLB(glTexStorage3D, void, GLenum target, GLsizei levels, GLenum internal, GLsizei w, GLsizei h, GLsizei d) { @autoreleasepool {
+    CTX(); int slot = gl_tex_slot(target); if (slot != 2 && slot != 3) { gl_set_error(GL_INVALID_ENUM); return; }   // 只收 2D 数组 / 3D（规范）
+    if (!gl_cur->tex_unit[gl_cur->active_unit][slot]) { gl_set_error(GL_INVALID_OPERATION); return; }   // 默认对象不能做不可变存储（同 glTexStorage2D）
+    gl_texture *t = bound_slot(slot); if (!t) return;
+    if (t->immutable) { gl_set_error(GL_INVALID_OPERATION); return; }
+    int is3d = target == GL_TEXTURE_3D, max_wh = is3d ? 2048 : 16384;
+    int maxl = is3d ? mip_count((NSUInteger)(w > d ? w : d), (NSUInteger)h) : mip_count((NSUInteger)w, (NSUInteger)h);
+    if (w < 1 || h < 1 || d < 1 || w > max_wh || h > max_wh || d > 2048 || levels < 1 || levels > maxl || levels > TEX_LEVELS) { gl_set_error(GL_INVALID_VALUE); return; }
+    int f = fmt_of((GLint)internal, 0);
+    if (internal == GL_RGBA || internal == GL_RGB || internal == GL_RED || internal == GL_RG || !f) { unsupported("glTexStorage3D internalformat", internal); return; }
+    if (is3d && k_fmt[f].kind != K_COL) { gl_set_error(GL_INVALID_OPERATION); return; }   // 深度 / 模板 / 压缩格式不能做 3D 纹理
+    if (!gpu_settle(t)) return;
+    id<MTLTexture> images[TEX_LEVELS] = {nil};
+    for (int l = 0; l < levels; l++) {
+        NSUInteger lw = (NSUInteger)w >> l, lh = (NSUInteger)h >> l, ld = is3d ? (NSUInteger)d >> l : (NSUInteger)d;
+        images[l] = allocate_vol(f, lw ? lw : 1, lh ? lh : 1, ld ? ld : 1, 1, is3d); if (!images[l]) return;
+    }
+    for (int l = 0; l < TEX_LEVELS; l++) { t->level[0][l].image = images[l]; t->level[0][l].format = internal; t->level[0][l].fmt = images[l] ? f : 0; }
+    sample_drop(t); t->immutable = levels; t->gpu_written = 0; t->last_use = 0;
+}}
 
 // ---------- 读回（glGetTexImage / glGetCompressedTexImage，Slay the Spire 取到入口） ----------
 // 读取目标 → 纹理与面：2D、立方体某面、2D 数组 / 3D（全部层 / 片）；GL_TEXTURE_CUBE_MAP 本身不是合法目标
